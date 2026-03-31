@@ -234,18 +234,17 @@ interface SimulationAnalysis {
 }
 
 const KNOWN_ERRORS: Record<string, string> = {
-  'InstructionError': 'On-chain instruction error',
   'InsufficientFundsForRent': 'Insufficient SOL for rent',
   'AccountNotFound': 'Required account does not exist',
   'InvalidAccountData': 'Account data is corrupted or wrong format',
-  'custom program error: 0x1': 'Insufficient funds',
-  'custom program error: 0x0': 'Generic program failure',
   'SlippageExceeded': 'Price moved beyond slippage tolerance',
   'Slippage tolerance exceeded': 'Price moved beyond slippage tolerance',
   'exceeding max': 'Maximum leverage or size exceeded',
   'Market is in Settle mode': 'Market is settling — try again later',
   'Market is in close only mode': 'Market is in close-only mode (high volatility)',
   'Position already exists': 'Position already exists for this market/side',
+  'InvalidWhitelistAccount': 'Wallet not whitelisted for this operation',
+  'InsufficientFunds': 'Insufficient funds for transaction',
 };
 
 function analyzeSimulation(
@@ -261,13 +260,21 @@ function analyzeSimulation(
     const errStr = JSON.stringify(simResult.err);
     let programError: string | undefined;
 
+    // First pass: extract AnchorError message (most specific)
     for (const logLine of logs) {
-      for (const [pattern, description] of Object.entries(KNOWN_ERRORS)) {
-        if (logLine.includes(pattern)) { programError = description; break; }
+      const anchor = logLine.match(/AnchorError.*Error Message: (.+?)\.?\s*$/);
+      if (anchor) { programError = anchor[1]; break; }
+      const progLog = logLine.match(/Program log: Error: (.+)/);
+      if (progLog) { programError = progLog[1]; break; }
+    }
+    // Second pass: match known patterns if no AnchorError found
+    if (!programError) {
+      for (const logLine of logs) {
+        for (const [pattern, description] of Object.entries(KNOWN_ERRORS)) {
+          if (logLine.includes(pattern)) { programError = description; break; }
+        }
+        if (programError) break;
       }
-      if (programError) break;
-      const m = logLine.match(/Program log: (?:Error: |error: |AnchorError.*msg: )(.+)/);
-      if (m) { programError = m[1]; break; }
     }
 
     log.error('TX:SIM', `FAILED: ${programError ?? errStr}`);
