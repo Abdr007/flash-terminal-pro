@@ -52,6 +52,10 @@ export interface AuditRecord {
   pool?: string;
   slippageBps?: number;
   retryCount?: number;
+  // Enhanced fields (TASK 7)
+  rpcUsed?: string;
+  driftPercent?: number;
+  quoteAgeMs?: number;
 }
 
 // ─── Audit Logger ───────────────────────────────────────────────────────────

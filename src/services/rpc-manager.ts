@@ -32,6 +32,8 @@ interface EndpointState {
   lastCheckMs: number;
   failedAt: number;       // 0 = never failed
   consecutiveFailures: number;
+  latencyMs: number;      // rolling average latency
+  latencySamples: number[];  // last N latency samples
 }
 
 // ─── RpcManager ─────────────────────────────────────────────────────────────
@@ -67,11 +69,13 @@ export class RpcManager {
       this.endpoints.push({
         url,
         connection,
-        healthy: true, // Assume healthy until proven otherwise
+        healthy: true,
         lastSlot: 0,
         lastCheckMs: 0,
         failedAt: 0,
         consecutiveFailures: 0,
+        latencyMs: 0,
+        latencySamples: [],
       });
     }
 
@@ -128,12 +132,20 @@ export class RpcManager {
       if (ep.failedAt > 0 && now - ep.failedAt < COOLDOWN_MS) continue;
 
       try {
+        const t0 = Date.now();
         const slot = await ep.connection.getSlot('confirmed');
+        const latency = Date.now() - t0;
+
         ep.lastSlot = slot;
         ep.lastCheckMs = now;
         ep.healthy = true;
         ep.consecutiveFailures = 0;
         ep.failedAt = 0;
+
+        // Rolling latency average (keep last 10 samples)
+        ep.latencySamples.push(latency);
+        if (ep.latencySamples.length > 10) ep.latencySamples.shift();
+        ep.latencyMs = Math.round(ep.latencySamples.reduce((a, b) => a + b, 0) / ep.latencySamples.length);
 
         if (slot > this._maxSlot) this._maxSlot = slot;
       } catch {
@@ -161,16 +173,20 @@ export class RpcManager {
 
   // ─── Failover ─────────────────────────────────────────────────────────
 
-  /** Select the healthiest endpoint (highest slot) */
+  /** Select the healthiest endpoint (highest slot, then lowest latency) */
   private selectBestEndpoint(): void {
     const log = getLogger();
     let bestIdx = this._activeIndex;
     let bestSlot = 0;
+    let bestLatency = Infinity;
 
     for (let i = 0; i < this.endpoints.length; i++) {
       const ep = this.endpoints[i];
-      if (ep.healthy && ep.lastSlot > bestSlot) {
+      if (!ep.healthy) continue;
+      // Prefer highest slot; tie-break on lowest latency
+      if (ep.lastSlot > bestSlot || (ep.lastSlot === bestSlot && ep.latencyMs < bestLatency)) {
         bestSlot = ep.lastSlot;
+        bestLatency = ep.latencyMs;
         bestIdx = i;
       }
     }
@@ -218,12 +234,14 @@ export class RpcManager {
   }
 
   /** Get health summary for display */
-  getHealthSummary(): { url: string; healthy: boolean; slot: number; lag: number }[] {
-    return this.endpoints.map(ep => ({
+  getHealthSummary(): { url: string; healthy: boolean; slot: number; lag: number; latencyMs: number; active: boolean }[] {
+    return this.endpoints.map((ep, i) => ({
       url: this.scrubUrl(ep.url),
       healthy: ep.healthy,
       slot: ep.lastSlot,
       lag: this._maxSlot > 0 ? this._maxSlot - ep.lastSlot : 0,
+      latencyMs: ep.latencyMs,
+      active: i === this._activeIndex,
     }));
   }
 

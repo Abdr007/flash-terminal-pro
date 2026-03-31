@@ -30,6 +30,7 @@ import type { FlashSdkClient } from '../services/sdk-client.js';
 import { crossValidateQuotes } from '../services/sdk-client.js';
 import type { WalletManager } from '../wallet/manager.js';
 import type { TxPipeline } from '../tx/pipeline.js';
+import type { RpcManager } from '../services/rpc-manager.js';
 import { resolvePool, resolveCollateralToken, resolveSwapPool } from '../services/pool-resolver.js';
 import { PostVerifier } from '../tx/post-verify.js';
 import { checkQuoteFreshness, checkPriceDrift, type TimedQuote } from '../tx/quote-guard.js';
@@ -79,6 +80,7 @@ export class ExecutionEngine implements IExecutionEngine {
   private sdk: FlashSdkClient;
   private wallet: WalletManager;
   txPipeline: TxPipeline;
+  private rpcManager: RpcManager | null = null;
 
   constructor(
     private config: FlashXConfig,
@@ -87,12 +89,14 @@ export class ExecutionEngine implements IExecutionEngine {
     sdk: FlashSdkClient,
     wallet: WalletManager,
     txPipeline: TxPipeline,
+    rpcManager?: RpcManager,
   ) {
     this.state = state;
     this.api = api;
     this.sdk = sdk;
     this.wallet = wallet;
     this.txPipeline = txPipeline;
+    this.rpcManager = rpcManager ?? null;
     this.risk = new RiskEngine(config, state);
   }
 
@@ -159,6 +163,8 @@ export class ExecutionEngine implements IExecutionEngine {
         return this.handleViewBalance();
       case Action.ViewTrades:
         return this.handleTradeHistory();
+      case Action.ViewStats:
+        return this.handleStats();
       case Action.ViewOrders:
       case Action.ViewFunding:
       case Action.ViewOI:
@@ -474,25 +480,37 @@ export class ExecutionEngine implements IExecutionEngine {
       }
     }
 
-    // ─── STEP 5: Display preview ──────────────────────────────────────
+    // ─── STEP 5: Enhanced preview ───────────────────────────────────────
     const estFee = quoteFee > 0 ? quoteFee : amount * 0.0007;
+    const quoteOutputNum = parseFloat(quoteOutput);
+
+    // Calculate rate for display
+    const rate = Number.isFinite(quoteOutputNum) && quoteOutputNum > 0
+      ? (quoteOutputNum / amount).toFixed(6)
+      : '—';
+    const slippagePct = (this.config.defaultSlippageBps / 100).toFixed(2);
+    const driftTolerance = '1.00'; // matches PRICE_DRIFT_THRESHOLD in quote-guard.ts
 
     const lines = [
       '',
       `  ${accentBold('SWAP PREVIEW')}`,
-      `  ${dim('─'.repeat(48))}`,
+      `  ${dim('─'.repeat(52))}`,
       '',
-      `  ${dim('Action:')}    ${chalk.bold('SWAP')}`,
-      `  ${dim('From:')}      ${chalk.white.bold(String(amount))} ${chalk.white.bold(inputToken)}`,
-      `  ${dim('To:')}        ${chalk.white.bold(quoteOutput)} ${chalk.white.bold(outputToken)}`,
-      `  ${dim('Pool:')}      ${dim(pool)}`,
-      `  ${dim('Est. Fee:')}  ${chalk.yellow(formatUsd(estFee))}`,
+      `  ${dim('Action:')}     ${chalk.bold('SWAP')}`,
+      `  ${dim('From:')}       ${chalk.white.bold(String(amount))} ${chalk.white.bold(inputToken)}`,
+      `  ${dim('To:')}         ${chalk.white.bold(quoteOutput)} ${chalk.white.bold(outputToken)}`,
+      `  ${dim('Rate:')}       ${dim(`1 ${inputToken} = ${rate} ${outputToken}`)}`,
+      `  ${dim('Pool:')}       ${dim(pool)}`,
+      `  ${dim('Est. Fee:')}   ${chalk.yellow(formatUsd(estFee))} ${dim(`(${((estFee / amount) * 100).toFixed(3)}%)`)}`,
     ];
 
-    if (quotePayUsd) lines.push(`  ${dim('You Pay:')}   ${dim(quotePayUsd + ' USD')}`);
-    if (quoteReceiveUsd) lines.push(`  ${dim('You Get:')}   ${dim(quoteReceiveUsd + ' USD')}`);
-    lines.push(`  ${dim('Slippage:')}  ${dim(this.config.defaultSlippageBps + ' bps')}`);
-    lines.push(`  ${dim('─'.repeat(48))}`);
+    if (quotePayUsd) lines.push(`  ${dim('You Pay:')}    ${dim('$' + quotePayUsd)}`);
+    if (quoteReceiveUsd) lines.push(`  ${dim('You Get:')}    ${dim('$' + quoteReceiveUsd)}`);
+    lines.push(
+      `  ${dim('Slippage:')}   ${dim(`${slippagePct}%`)} ${dim(`(${this.config.defaultSlippageBps} bps)`)}`,
+      `  ${dim('Max Drift:')}  ${dim(`${driftTolerance}%`)}`,
+    );
+    lines.push(`  ${dim('─'.repeat(52))}`);
 
     if (risk.mustConfirm) {
       for (const c of risk.checks.filter(c => c.status === 'WARNING')) {
@@ -817,6 +835,49 @@ export class ExecutionEngine implements IExecutionEngine {
     return { success: true, error: lines.join('\n') };
   }
 
+  // ─── Stats Command ────────────────────────────────────────────────────
+
+  private handleStats(): TxResult {
+    const m = getMetrics().snapshot();
+    const totalAttempted = m.tradesAttempted + m.swapsAttempted;
+    const totalSucceeded = m.tradesSucceeded + m.swapsSucceeded;
+    const successRate = totalAttempted > 0
+      ? ((totalSucceeded / totalAttempted) * 100).toFixed(1)
+      : '—';
+    const failRate = totalAttempted > 0
+      ? (((m.tradesFailed + (m.swapsAttempted - m.swapsSucceeded)) / totalAttempted) * 100).toFixed(1)
+      : '—';
+    const uptimeMin = Math.floor(m.uptimeMs / 60_000);
+    const uptimeHr = Math.floor(uptimeMin / 60);
+
+    const lines = [
+      '',
+      `  ${accentBold('EXECUTION STATS')}`,
+      `  ${dim('─'.repeat(48))}`,
+      '',
+      `  ${dim('Perp Trades')}`,
+      `    ${dim('Attempted:')}  ${m.tradesAttempted}`,
+      `    ${dim('Succeeded:')}  ${ok(String(m.tradesSucceeded))}`,
+      `    ${dim('Failed:')}     ${m.tradesFailed > 0 ? err(String(m.tradesFailed)) : dim('0')}`,
+      `    ${dim('Blocked:')}    ${m.tradesBlocked > 0 ? warn(String(m.tradesBlocked)) : dim('0')}`,
+      '',
+      `  ${dim('Swaps')}`,
+      `    ${dim('Attempted:')}  ${m.swapsAttempted}`,
+      `    ${dim('Succeeded:')}  ${ok(String(m.swapsSucceeded))}`,
+      '',
+      `  ${dim('Overall')}`,
+      `    ${dim('Success Rate:')} ${totalSucceeded > 0 ? ok(successRate + '%') : dim(successRate)}`,
+      `    ${dim('Fail Rate:')}    ${failRate !== '—' && parseFloat(failRate) > 0 ? err(failRate + '%') : dim(failRate)}`,
+      `    ${dim('Avg Exec:')}     ${m.avgExecutionMs > 0 ? `${m.avgExecutionMs}ms` : dim('—')}`,
+      `    ${dim('Last Trade:')}   ${m.lastTradeAt ? dim(m.lastTradeAt) : dim('None')}`,
+      `    ${dim('Uptime:')}       ${uptimeHr > 0 ? `${uptimeHr}h ${uptimeMin % 60}m` : `${uptimeMin}m`}`,
+      `  ${dim('─'.repeat(48))}`,
+      '',
+    ];
+
+    return { success: true, error: lines.join('\n') };
+  }
+
   // ─── System Handlers ──────────────────────────────────────────────────
 
   private async handleHealth(): Promise<TxResult> {
@@ -833,7 +894,6 @@ export class ExecutionEngine implements IExecutionEngine {
     lines.push(
       `  ${dim('Network:')}    ${this.config.network}`,
       `  ${dim('API:')}        ${this.config.flashApiUrl}`,
-      `  ${dim('RPC:')}        ${this.config.rpcUrl.substring(0, 40)}...`,
       `  ${dim('Wallet:')}     ${this.wallet.isConnected ? ok(this.wallet.shortAddress) : warn('Not connected')}`,
       `  ${dim('Max Lev:')}    ${this.config.maxLeverage}x`,
       `  ${dim('Max Size:')}   ${formatUsd(this.config.maxPositionSize)}`,
@@ -847,6 +907,19 @@ export class ExecutionEngine implements IExecutionEngine {
       const msg = e instanceof Error ? e.message : String(e);
       lines.push(`  ${dim('API Status:')} ${err('UNREACHABLE')} ${dim(msg.substring(0, 40))}`);
       log.warn('HEALTH', `API unreachable: ${msg}`);
+    }
+
+    // RPC endpoint health
+    if (this.rpcManager) {
+      lines.push('');
+      lines.push(`  ${accentBold('RPC ENDPOINTS')}`);
+      const rpcHealth = this.rpcManager.getHealthSummary();
+      for (const ep of rpcHealth) {
+        const status = ep.healthy ? ok('OK') : err('DOWN');
+        const active = ep.active ? chalk.cyan(' ◀') : '';
+        const latStr = ep.latencyMs > 0 ? `${ep.latencyMs}ms` : '—';
+        lines.push(`  ${dim('  ')}${pad(ep.url, 32)} ${status} ${dim(`lat=${latStr}`)} ${dim(`lag=${ep.lag}`)}${active}`);
+      }
     }
 
     // Execution metrics
@@ -902,6 +975,7 @@ export class ExecutionEngine implements IExecutionEngine {
       `    pools                      Pool overview`,
       `    balance                    Wallet balance`,
       `    trades / history           Trade history`,
+      `    stats                      Execution statistics`,
       '',
       `  ${chalk.cyan('SYSTEM')}`,
       `    health                     System status`,

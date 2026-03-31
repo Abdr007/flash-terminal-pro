@@ -55,8 +55,8 @@ async function main(): Promise<void> {
   // Start RPC health monitoring
   rpcManager.startHealthMonitor();
 
-  // Initialize execution engine
-  const execution = new ExecutionEngine(config, state, api, sdk, wallet, txPipeline);
+  // Initialize execution engine (with RPC manager for health display)
+  const execution = new ExecutionEngine(config, state, api, sdk, wallet, txPipeline, rpcManager);
   const router = new CommandRouter(execution);
 
   // Single command mode
