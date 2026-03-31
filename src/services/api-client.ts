@@ -10,6 +10,7 @@
 
 import type { IApiClient, ApiQuote, FlashXConfig } from '../types/index.js';
 import { scrubError } from '../utils/format.js';
+import { getLogger } from '../utils/logger.js';
 
 // ─── API Response Types ─────────────────────────────────────────────────────
 
@@ -48,9 +49,12 @@ export class FlashApiClient implements IApiClient {
   // ─── Internal Fetch ───────────────────────────────────────────────────
 
   private async get<T>(path: string): Promise<T> {
+    const log = getLogger();
     const url = `${this.baseUrl}${path}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    log.debug('API', `GET ${path}`);
 
     try {
       const res = await fetch(url, {
@@ -60,6 +64,7 @@ export class FlashApiClient implements IApiClient {
       });
 
       if (!res.ok) {
+        log.error('API', `GET ${path} → ${res.status} ${res.statusText}`);
         throw new Error(`API ${res.status}: ${res.statusText}`);
       }
 
@@ -69,18 +74,24 @@ export class FlashApiClient implements IApiClient {
         throw new Error(`Response too large: ${contentLength} bytes`);
       }
 
+      log.debug('API', `GET ${path} → 200 OK`);
       return await res.json() as T;
     } catch (e) {
-      throw new Error(`API GET ${path} failed: ${scrubError(String(e))}`);
+      const msg = scrubError(String(e));
+      log.error('API', `GET ${path} failed: ${msg}`);
+      throw new Error(`API GET ${path} failed: ${msg}`);
     } finally {
       clearTimeout(timeout);
     }
   }
 
   private async post<T>(path: string, body: Record<string, unknown>): Promise<T> {
+    const log = getLogger();
     const url = `${this.baseUrl}${path}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    log.debug('API', `POST ${path}`);
 
     try {
       const res = await fetch(url, {
@@ -93,10 +104,13 @@ export class FlashApiClient implements IApiClient {
         signal: controller.signal,
       });
 
+      log.debug('API', `POST ${path} → ${res.status}`);
       // Flash API returns 200 even on errors — always check `err` field
       return await res.json() as T;
     } catch (e) {
-      throw new Error(`API POST ${path} failed: ${scrubError(String(e))}`);
+      const msg = scrubError(String(e));
+      log.error('API', `POST ${path} failed: ${msg}`);
+      throw new Error(`API POST ${path} failed: ${msg}`);
     } finally {
       clearTimeout(timeout);
     }

@@ -24,6 +24,7 @@ import {
   type IStateEngine,
   type FlashXConfig,
 } from '../types/index.js';
+import { getLogger } from '../utils/logger.js';
 
 // ─── Risk Check Helpers ─────────────────────────────────────────────────────
 
@@ -48,6 +49,20 @@ export class RiskEngine {
   ) {}
 
   async evaluate(intent: TradeIntent): Promise<RiskAssessment> {
+    const log = getLogger();
+
+    // DEV_MODE bypass — allows full pipeline testing without wallet/balance
+    if (this.config.devMode) {
+      log.warn('RISK', 'DEV_MODE ACTIVE — all risk checks bypassed');
+      return {
+        allowed: true,
+        mustConfirm: true,
+        level: RiskLevel.Warning,
+        checks: [warning('dev_mode', 'DEV_MODE ACTIVE — risk checks bypassed')],
+        summary: 'DEV_MODE ACTIVE — risk checks bypassed',
+      };
+    }
+
     const checks: RiskCheck[] = [];
 
     checks.push(this.checkLeverage(intent));
@@ -71,6 +86,8 @@ export class RiskEngine {
       : warned.length > 0
         ? warned.map(c => c.message).join('; ')
         : 'All checks passed';
+
+    log.debug('RISK', `Evaluation: ${level} — ${summary}`);
 
     return {
       allowed: blocked.length === 0,

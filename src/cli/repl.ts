@@ -31,7 +31,7 @@ export class Repl {
 
     // Banner
     console.log('');
-    console.log(`  ${accentBold('flash-x')} ${dim('v0.1.0')}`);
+    console.log(`  ${accentBold('flash')} ${dim('v0.1.0')}`);
     console.log(`  ${dim('Protocol-grade CLI for Flash.trade')}`);
     console.log('');
 
@@ -39,6 +39,9 @@ export class Repl {
       ? chalk.yellow('SIMULATION')
       : chalk.green('LIVE');
     console.log(`  ${dim('Mode:')}    ${mode}`);
+    if (this.config.devMode) {
+      console.log(`  ${dim('Dev:')}     ${chalk.magenta.bold('DEV_MODE ACTIVE')}`);
+    }
     console.log(`  ${dim('Network:')} ${this.config.network}`);
     console.log(`  ${dim('Type "help" for commands')}`);
     console.log('');
@@ -46,7 +49,7 @@ export class Repl {
     this.rl = createInterface({
       input: process.stdin,
       output: process.stdout,
-      prompt: `${chalk.cyan('flash-x')}${chalk.dim('>')} `,
+      prompt: `${chalk.cyan('flash')}${chalk.dim('>')} `,
       historySize: 200,
     });
 

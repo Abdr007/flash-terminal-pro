@@ -14,7 +14,6 @@
 import chalk from 'chalk';
 import {
   Action,
-  Side,
   type ParsedCommand,
   type TradeIntent,
   type TxResult,
@@ -24,6 +23,11 @@ import {
 } from '../types/index.js';
 import { RiskEngine } from './risk-engine.js';
 import { StateEngine } from './state-engine.js';
+import { getLogger } from '../utils/logger.js';
+import type { FlashApiClient } from '../services/api-client.js';
+import type { WalletManager } from '../wallet/manager.js';
+import type { TxPipeline } from '../tx/pipeline.js';
+import { resolvePool, resolveCollateralToken } from '../services/pool-resolver.js';
 import {
   formatUsd,
   formatPrice,
@@ -38,17 +42,46 @@ import {
   pad,
 } from '../utils/format.js';
 
+// ─── Fee estimation constants (from Flash protocol docs) ────────────────────
+// These are the standard open/close fee rates per pool/asset
+const FEE_RATES: Record<string, number> = {
+  SOL: 0.00051,  BTC: 0.00051,  ETH: 0.00051,   // Crypto: 0.051%
+  ZEC: 0.002,    BNB: 0.001,                      // Crypto alt
+  EUR: 0.0003,   GBP: 0.0003,   USDJPY: 0.0003, USDCNH: 0.0003, // FX: 0.03%
+  XAU: 0.001,    XAG: 0.001,    CRUDEOIL: 0.0015, NATGAS: 0.0015, // Commodities
+  JUP: 0.0011,   JTO: 0.0011,   RAY: 0.0011, PYTH: 0.0011, // Governance: 0.11%
+  KMNO: 0.002,   MET: 0.002,    HYPE: 0.002,
+  BONK: 0.0012,  WIF: 0.0012,   PENGU: 0.0012, PUMP: 0.0012, FARTCOIN: 0.0012, // Meme
+  SPY: 0.001,    NVDA: 0.001,   TSLA: 0.001, AAPL: 0.001, AMD: 0.001, AMZN: 0.001, // Equity
+  ORE: 0.002,
+};
+
+function estimateFee(market: string, sizeUsd: number): number {
+  const rate = FEE_RATES[market] ?? 0.001; // default 0.1%
+  return sizeUsd * rate;
+}
+
 // ─── ExecutionEngine ────────────────────────────────────────────────────────
 
 export class ExecutionEngine implements IExecutionEngine {
   private risk: RiskEngine;
   private state: StateEngine;
+  private api: FlashApiClient;
+  private wallet: WalletManager;
+  // txPipeline stored for Phase 2 execution — used when API returns transactionBase64
+  txPipeline: TxPipeline;
 
   constructor(
     private config: FlashXConfig,
     state: StateEngine,
+    api: FlashApiClient,
+    wallet: WalletManager,
+    txPipeline: TxPipeline,
   ) {
     this.state = state;
+    this.api = api;
+    this.wallet = wallet;
+    this.txPipeline = txPipeline;
     this.risk = new RiskEngine(config, state);
   }
 
@@ -56,8 +89,12 @@ export class ExecutionEngine implements IExecutionEngine {
    * Main entry point — routes a parsed command to the appropriate handler.
    */
   async execute(command: ParsedCommand): Promise<TxResult> {
+    const log = getLogger();
+    log.debug('ENGINE', `Routing: ${command.action} [${command.source}, conf=${command.confidence}]`);
+
     // If low confidence, show what we understood and ask for confirmation
     if (command.confidence < 0.8 && command.action !== Action.Unknown) {
+      log.warn('ENGINE', `Low confidence parse (${(command.confidence * 100).toFixed(0)}%) — suggesting`);
       return {
         success: false,
         error: this.formatSuggestion(command),
@@ -152,11 +189,18 @@ export class ExecutionEngine implements IExecutionEngine {
   // ─── Trade Handlers ─────────────────────────────────────────────────────
 
   private async handleOpen(command: ParsedCommand): Promise<TxResult> {
+    const log = getLogger();
     const { market, side, leverage, collateral, takeProfit, stopLoss, degen, collateralToken } = command.params;
 
     if (!market || !side || !leverage || !collateral) {
       return { success: false, error: err('  Missing parameters. Usage: long SOL 10x $100') };
     }
+
+    log.info('ENGINE', `Open: ${market} ${side} ${leverage}x $${collateral}`);
+
+    // Resolve pool and collateral token from protocol rules
+    const pool = resolvePool(market) ?? 'Crypto.1';
+    const resolvedCollToken = collateralToken ?? resolveCollateralToken(market, side);
 
     // Build trade intent
     const intent: TradeIntent = {
@@ -165,18 +209,19 @@ export class ExecutionEngine implements IExecutionEngine {
       side,
       leverage,
       collateral,
-      collateralToken: collateralToken ?? (side === Side.Long ? market : 'USDC'),
+      collateralToken: resolvedCollToken,
       sizeUsd: collateral * leverage,
       takeProfit,
       stopLoss,
       degen: degen ?? false,
-      pool: 'Crypto.1', // Phase 2: resolve from market
+      pool,
     };
 
     // Risk check
     const risk = await this.risk.evaluate(intent);
 
     if (!risk.allowed) {
+      log.warn('ENGINE', `Trade blocked: ${risk.summary}`);
       const lines = [
         '',
         `  ${err('TRADE BLOCKED')}`,
@@ -189,51 +234,68 @@ export class ExecutionEngine implements IExecutionEngine {
       return { success: false, error: lines.join('\n') };
     }
 
-    // Display preview
+    // ─── PREVIEW SYSTEM ─────────────────────────────────────────────────
+    const estFee = estimateFee(market, intent.sizeUsd);
+
     const lines = [
       '',
       `  ${accentBold('TRADE PREVIEW')}`,
+      `  ${dim('─'.repeat(48))}`,
       '',
-      `  ${dim('Market:')}      ${market}-${colorSide(side)}`,
-      `  ${dim('Leverage:')}    ${leverage}x`,
-      `  ${dim('Collateral:')}  ${formatUsd(collateral)}`,
-      `  ${dim('Size:')}        ${formatUsd(intent.sizeUsd)}`,
+      `  ${dim('Action:')}      ${chalk.bold('OPEN POSITION')}`,
+      `  ${dim('Market:')}      ${chalk.white.bold(market)}-${colorSide(side)}`,
+      `  ${dim('Leverage:')}    ${chalk.white.bold(leverage + 'x')}`,
+      `  ${dim('Collateral:')}  ${chalk.white.bold(formatUsd(collateral))} ${dim(`(${intent.collateralToken})`)}`,
+      `  ${dim('Size:')}        ${chalk.white.bold(formatUsd(intent.sizeUsd))}`,
+      `  ${dim('Est. Fee:')}    ${chalk.yellow(formatUsd(estFee))} ${dim(`(${((FEE_RATES[market] ?? 0.001) * 100).toFixed(3)}%)`)}`,
     ];
 
-    if (takeProfit) lines.push(`  ${dim('Take Profit:')} ${formatPrice(takeProfit)}`);
-    if (stopLoss) lines.push(`  ${dim('Stop Loss:')}   ${formatPrice(stopLoss)}`);
+    if (takeProfit) lines.push(`  ${dim('Take Profit:')} ${chalk.green(formatPrice(takeProfit))}`);
+    if (stopLoss) lines.push(`  ${dim('Stop Loss:')}   ${chalk.red(formatPrice(stopLoss))}`);
+    if (degen) lines.push(`  ${dim('Mode:')}        ${chalk.magenta.bold('DEGEN')}`);
 
+    lines.push(`  ${dim('─'.repeat(48))}`);
+
+    // Risk warnings
     if (risk.mustConfirm) {
-      lines.push('');
       for (const c of risk.checks.filter(c => c.status === 'WARNING')) {
         lines.push(`  ${chalk.yellow('⚠')} ${c.message}`);
       }
+      lines.push('');
     }
 
-    lines.push('');
+    // Mode indicator
+    if (this.config.devMode) {
+      lines.push(`  ${chalk.magenta.bold('DEV MODE')} — pipeline testing active`);
+    }
     if (this.config.simulationMode) {
       lines.push(`  ${dim('[SIMULATION MODE — no real transaction]')}`);
-    } else {
-      lines.push(`  ${warn('Phase 2: will build and send real transaction here')}`);
     }
     lines.push('');
 
+    log.success('ENGINE', `Preview displayed: ${market} ${side} ${leverage}x ${formatUsd(collateral)}`);
     return { success: true, error: lines.join('\n') };
   }
 
   private async handleClose(command: ParsedCommand): Promise<TxResult> {
+    const log = getLogger();
     const { market, side, percent, amount } = command.params;
     if (!market) return { success: false, error: err('  Missing market. Usage: close SOL') };
 
+    log.info('ENGINE', `Close: ${market}${side ? ' ' + side : ''}${percent ? ' ' + percent + '%' : ''}`);
+
     const lines = [
       '',
-      `  ${accentBold('CLOSE POSITION')}`,
+      `  ${accentBold('CLOSE PREVIEW')}`,
+      `  ${dim('─'.repeat(48))}`,
       '',
-      `  ${dim('Market:')}  ${market}${side ? ' ' + colorSide(side) : ''}`,
+      `  ${dim('Action:')}  ${chalk.bold('CLOSE POSITION')}`,
+      `  ${dim('Market:')}  ${chalk.white.bold(market)}${side ? ' ' + colorSide(side) : ''}`,
     ];
-    if (percent) lines.push(`  ${dim('Close:')}   ${percent}%`);
-    if (amount) lines.push(`  ${dim('Amount:')}  ${formatUsd(amount)}`);
-    lines.push('', `  ${dim('[Phase 2: will execute close here]')}`, '');
+    if (percent) lines.push(`  ${dim('Close:')}   ${chalk.white.bold(percent + '%')}`);
+    else if (amount) lines.push(`  ${dim('Amount:')}  ${chalk.white.bold(formatUsd(amount))}`);
+    else lines.push(`  ${dim('Close:')}   ${chalk.white.bold('100%')}`);
+    lines.push(`  ${dim('─'.repeat(48))}`, '');
 
     return { success: true, error: lines.join('\n') };
   }
@@ -275,21 +337,29 @@ export class ExecutionEngine implements IExecutionEngine {
   // ─── Swap Handler ─────────────────────────────────────────────────────
 
   private async handleSwap(command: ParsedCommand): Promise<TxResult> {
+    const log = getLogger();
     const { inputToken, outputToken, amount } = command.params;
     if (!inputToken || !outputToken || !amount) {
       return { success: false, error: err('  Usage: swap 50 USDC to SOL') };
     }
+
+    log.info('ENGINE', `Swap: ${amount} ${inputToken} → ${outputToken}`);
+
+    // Estimate swap fee (base 0.02% + pool ratio fee ~0.05%)
+    const estSwapFee = amount * 0.0007;
 
     return {
       success: true,
       error: [
         '',
         `  ${accentBold('SWAP PREVIEW')}`,
+        `  ${dim('─'.repeat(48))}`,
         '',
-        `  ${dim('From:')}    ${amount} ${inputToken}`,
-        `  ${dim('To:')}      ${outputToken}`,
-        '',
-        `  ${dim('[Phase 3: will execute swap here]')}`,
+        `  ${dim('Action:')}    ${chalk.bold('SWAP')}`,
+        `  ${dim('From:')}      ${chalk.white.bold(String(amount))} ${chalk.white.bold(inputToken)}`,
+        `  ${dim('To:')}        ${chalk.white.bold(outputToken)}`,
+        `  ${dim('Est. Fee:')}  ${chalk.yellow(formatUsd(estSwapFee))} ${dim('(~0.07%)')}`,
+        `  ${dim('─'.repeat(48))}`,
         '',
       ].join('\n'),
     };
@@ -428,27 +498,43 @@ export class ExecutionEngine implements IExecutionEngine {
   // ─── System Handlers ──────────────────────────────────────────────────
 
   private async handleHealth(): Promise<TxResult> {
-    return {
-      success: true,
-      error: [
-        '',
-        `  ${accentBold('SYSTEM HEALTH')}`,
-        '',
-        `  ${dim('Mode:')}       ${this.config.simulationMode ? warn('SIMULATION') : ok('LIVE')}`,
-        `  ${dim('Network:')}    ${this.config.network}`,
-        `  ${dim('API:')}        ${this.config.flashApiUrl}`,
-        `  ${dim('RPC:')}        ${this.config.rpcUrl.substring(0, 40)}...`,
-        `  ${dim('Max Lev:')}    ${this.config.maxLeverage}x`,
-        `  ${dim('Max Size:')}   ${formatUsd(this.config.maxPositionSize)}`,
-        '',
-      ].join('\n'),
-    };
+    const log = getLogger();
+    const lines = [
+      '',
+      `  ${accentBold('SYSTEM HEALTH')}`,
+      '',
+      `  ${dim('Mode:')}       ${this.config.simulationMode ? warn('SIMULATION') : ok('LIVE')}`,
+    ];
+    if (this.config.devMode) {
+      lines.push(`  ${dim('Dev Mode:')}   ${chalk.magenta.bold('ACTIVE')}`);
+    }
+    lines.push(
+      `  ${dim('Network:')}    ${this.config.network}`,
+      `  ${dim('API:')}        ${this.config.flashApiUrl}`,
+      `  ${dim('RPC:')}        ${this.config.rpcUrl.substring(0, 40)}...`,
+      `  ${dim('Wallet:')}     ${this.wallet.isConnected ? ok(this.wallet.shortAddress) : warn('Not connected')}`,
+      `  ${dim('Max Lev:')}    ${this.config.maxLeverage}x`,
+      `  ${dim('Max Size:')}   ${formatUsd(this.config.maxPositionSize)}`,
+    );
+
+    // Try real API health check
+    try {
+      const health = await this.api.health();
+      lines.push(`  ${dim('API Status:')} ${ok(String(health.status ?? 'OK'))}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      lines.push(`  ${dim('API Status:')} ${err('UNREACHABLE')} ${dim(msg.substring(0, 40))}`);
+      log.warn('HEALTH', `API unreachable: ${msg}`);
+    }
+
+    lines.push('');
+    return { success: true, error: lines.join('\n') };
   }
 
   private handleHelp(): TxResult {
     const lines = [
       '',
-      `  ${accentBold('flash-x')} — Flash Trade Protocol CLI`,
+      `  ${accentBold('flash')} — Flash Trade Protocol CLI`,
       '',
       `  ${chalk.cyan('TRADING')}`,
       `    long SOL 10x $100          Open long position`,

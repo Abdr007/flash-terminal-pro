@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "flash-x": "dist/index.js"
+    "flash": "dist/index.js"
   },
   "scripts": {
     "build": "tsc && chmod +x dist/index.js",

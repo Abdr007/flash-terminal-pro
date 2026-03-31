@@ -302,6 +302,9 @@ export interface FlashXConfig {
   keypairPath?: string;
   simulationMode: boolean;
 
+  // Dev mode — bypasses risk blocks for testing
+  devMode: boolean;
+
   // Risk limits
   maxLeverage: number;
   maxCollateralPerTrade: number;

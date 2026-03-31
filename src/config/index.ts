@@ -134,6 +134,7 @@ export function loadConfig(): FlashXConfig {
 
     keypairPath: env('KEYPAIR_PATH') ? resolveHome(env('KEYPAIR_PATH')!) : undefined,
     simulationMode: envBool('SIMULATION_MODE', true),
+    devMode: envBool('DEV_MODE', false),
 
     maxLeverage: envInt('MAX_LEVERAGE', 50),
     maxCollateralPerTrade: envInt('MAX_COLLATERAL_PER_TRADE', 1000),

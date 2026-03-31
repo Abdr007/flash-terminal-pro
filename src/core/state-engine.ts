@@ -1,10 +1,9 @@
 /**
  * StateEngine
  *
- * Centralized state management with caching.
- * Holds positions, prices, balances, markets — all with TTL-based expiry.
- *
- * In Phase 1 this returns mock data. Phase 2+ connects to real API/SDK/RPC.
+ * Centralized state management with TTL caching.
+ * Fetches real data from Flash API and wallet.
+ * Falls back to cached data on failure.
  */
 
 import {
@@ -14,6 +13,10 @@ import {
   type Market,
   type Pool,
 } from '../types/index.js';
+import type { FlashApiClient } from '../services/api-client.js';
+import type { WalletManager } from '../wallet/manager.js';
+import { getLogger } from '../utils/logger.js';
+import { resolvePool as resolvePoolFn } from '../services/pool-resolver.js';
 
 // ─── Cache ──────────────────────────────────────────────────────────────────
 
@@ -37,7 +40,6 @@ class TTLCache<T> {
   }
 
   set(key: string, data: T): void {
-    // Bound cache size
     if (this.store.size >= 500) {
       const oldest = this.store.keys().next().value;
       if (oldest !== undefined) this.store.delete(oldest);
@@ -53,39 +55,155 @@ class TTLCache<T> {
 // ─── StateEngine ────────────────────────────────────────────────────────────
 
 export class StateEngine implements IStateEngine {
-  private positionCache = new TTLCache<Position[]>(10_000);  // 10s
-  private priceCache = new TTLCache<number>(5_000);           // 5s
-  private marketCache = new TTLCache<Market[]>(30_000);       // 30s
-  private poolCache = new TTLCache<Pool[]>(60_000);           // 60s
-  private balanceCache = new TTLCache<number>(15_000);        // 15s
+  private positionCache = new TTLCache<Position[]>(10_000);
+  private priceCache = new TTLCache<number>(5_000);
+  private marketCache = new TTLCache<Market[]>(30_000);
+  private poolCache = new TTLCache<Pool[]>(60_000);
+  private balanceCache = new TTLCache<number>(15_000);
 
-  // Will be injected in Phase 2
-  // private apiClient: IApiClient;
-  // private sdkClient: ISdkClient;
+  private api: FlashApiClient | null = null;
+  private wallet: WalletManager | null = null;
+
+  /** Inject real API client (called during bootstrap) */
+  setApiClient(api: FlashApiClient): void {
+    this.api = api;
+  }
+
+  /** Inject wallet manager (called during bootstrap) */
+  setWallet(wallet: WalletManager): void {
+    this.wallet = wallet;
+  }
+
+  // ─── Positions ──────────────────────────────────────────────────────
 
   async getPositions(): Promise<Position[]> {
     const cached = this.positionCache.get('all');
     if (cached) return cached;
 
-    // Phase 1: return empty — no wallet connected
-    const positions: Position[] = [];
-    this.positionCache.set('all', positions);
-    return positions;
+    if (!this.api || !this.wallet?.publicKey) return [];
+
+    const log = getLogger();
+    try {
+      const raw = await this.api.getPositions(this.wallet.publicKey.toBase58()) as Record<string, unknown>[];
+      const positions = raw.map(p => this.mapPosition(p)).filter((p): p is Position => p !== null);
+      this.positionCache.set('all', positions);
+      log.debug('STATE', `Fetched ${positions.length} positions`);
+      return positions;
+    } catch (e) {
+      log.warn('STATE', `Position fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+      return [];
+    }
   }
 
   async getPosition(market: string, side?: Side): Promise<Position | null> {
     const positions = await this.getPositions();
-    return positions.find(p =>
-      p.market === market && (!side || p.side === side)
-    ) ?? null;
+    return positions.find(p => p.market === market && (!side || p.side === side)) ?? null;
   }
+
+  private mapPosition(raw: Record<string, unknown>): Position | null {
+    try {
+      // Flash API enriched position format
+      const r = raw as Record<string, unknown>;
+      return {
+        pubkey: String(r['pubkey'] ?? r['positionKey'] ?? ''),
+        market: String(r['marketSymbol'] ?? r['symbol'] ?? ''),
+        side: String(r['side']).toUpperCase() === 'SHORT' ? Side.Short : Side.Long,
+        leverage: Number(r['leverage'] ?? 0),
+        sizeUsd: Number(r['sizeUsd'] ?? r['sizeUsdUi'] ?? 0),
+        collateralUsd: Number(r['collateralUsd'] ?? r['collateralUsdUi'] ?? 0),
+        entryPrice: Number(r['entryPrice'] ?? r['entryPriceUi'] ?? 0),
+        markPrice: Number(r['markPrice'] ?? r['markPriceUi'] ?? 0),
+        liquidationPrice: Number(r['liquidationPrice'] ?? r['liquidationPriceUi'] ?? 0),
+        pnl: Number(r['pnl'] ?? r['pnlUsd'] ?? 0),
+        pnlPercent: Number(r['pnlPercent'] ?? 0),
+        fees: Number(r['fees'] ?? r['totalFees'] ?? 0),
+        fundingRate: Number(r['fundingRate'] ?? 0),
+        openTime: Number(r['openTime'] ?? 0),
+        pool: String(r['pool'] ?? r['poolName'] ?? ''),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // ─── Markets ──────────────────────────────────────────────────────────
 
   async getMarkets(): Promise<Market[]> {
     const cached = this.marketCache.get('all');
     if (cached) return cached;
 
-    // Phase 1: stub markets from known Flash Trade pools
-    const markets: Market[] = [
+    if (!this.api) return this.defaultMarkets();
+
+    const log = getLogger();
+    try {
+      // Try fetching real prices to enrich market data
+      const priceData = await this.api.getPrices() as Record<string, Record<string, unknown>>;
+      const markets = this.buildMarketsFromPrices(priceData);
+      if (markets.length > 0) {
+        this.marketCache.set('all', markets);
+        log.debug('STATE', `Fetched ${markets.length} markets with live prices`);
+        return markets;
+      }
+    } catch (e) {
+      log.debug('STATE', `Market fetch failed, using defaults: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    const defaults = this.defaultMarkets();
+    this.marketCache.set('all', defaults);
+    return defaults;
+  }
+
+  async getMarket(symbol: string): Promise<Market | null> {
+    const markets = await this.getMarkets();
+    return markets.find(m => m.symbol === symbol) ?? null;
+  }
+
+  private buildMarketsFromPrices(priceData: Record<string, Record<string, unknown>>): Market[] {
+    const markets: Market[] = [];
+
+    for (const [symbol, data] of Object.entries(priceData)) {
+      const pool = resolvePoolFn(symbol);
+      if (!pool) continue;
+
+      markets.push({
+        symbol,
+        pool,
+        price: Number(data['priceUi'] ?? data['price'] ?? 0),
+        change24h: 0, // Not available from /prices
+        oiLong: 0,
+        oiShort: 0,
+        maxLeverage: this.getMaxLeverage(pool),
+        maxDegenLeverage: this.getMaxDegenLeverage(pool),
+        fundingRate: 0,
+        isOpen: String(data['marketSession'] ?? 'open').toLowerCase() !== 'closed',
+      });
+    }
+    return markets;
+  }
+
+  private getMaxLeverage(pool: string): number {
+    switch (pool) {
+      case 'Crypto.1': return 100;
+      case 'Virtual.1': return 100;
+      case 'Governance.1': return 50;
+      case 'Community.1': case 'Community.2': case 'Trump.1': return 25;
+      case 'Equity.1': return 20;
+      case 'Ore.1': return 5;
+      default: return 50;
+    }
+  }
+
+  private getMaxDegenLeverage(pool: string): number {
+    switch (pool) {
+      case 'Crypto.1': return 500;
+      case 'Virtual.1': return 200;
+      case 'Governance.1': return 100;
+      default: return this.getMaxLeverage(pool);
+    }
+  }
+
+  private defaultMarkets(): Market[] {
+    return [
       { symbol: 'SOL', pool: 'Crypto.1', price: 0, change24h: 0, oiLong: 0, oiShort: 0, maxLeverage: 100, maxDegenLeverage: 500, fundingRate: 0, isOpen: true },
       { symbol: 'BTC', pool: 'Crypto.1', price: 0, change24h: 0, oiLong: 0, oiShort: 0, maxLeverage: 100, maxDegenLeverage: 500, fundingRate: 0, isOpen: true },
       { symbol: 'ETH', pool: 'Crypto.1', price: 0, change24h: 0, oiLong: 0, oiShort: 0, maxLeverage: 100, maxDegenLeverage: 500, fundingRate: 0, isOpen: true },
@@ -95,42 +213,101 @@ export class StateEngine implements IStateEngine {
       { symbol: 'BONK', pool: 'Community.1', price: 0, change24h: 0, oiLong: 0, oiShort: 0, maxLeverage: 25, maxDegenLeverage: 50, fundingRate: 0, isOpen: true },
       { symbol: 'SPY', pool: 'Equity.1', price: 0, change24h: 0, oiLong: 0, oiShort: 0, maxLeverage: 20, maxDegenLeverage: 20, fundingRate: 0, isOpen: false },
     ];
-    this.marketCache.set('all', markets);
-    return markets;
   }
 
-  async getMarket(symbol: string): Promise<Market | null> {
-    const markets = await this.getMarkets();
-    return markets.find(m => m.symbol === symbol) ?? null;
-  }
+  // ─── Pools ────────────────────────────────────────────────────────────
 
   async getPools(): Promise<Pool[]> {
     const cached = this.poolCache.get('all');
     if (cached) return cached;
 
-    const pools: Pool[] = [
+    if (!this.api) return this.defaultPools();
+
+    const log = getLogger();
+    try {
+      const raw = await this.api.getPoolData() as Record<string, unknown>[];
+      if (Array.isArray(raw) && raw.length > 0) {
+        const pools = raw.map(p => this.mapPool(p)).filter((p): p is Pool => p !== null);
+        if (pools.length > 0) {
+          this.poolCache.set('all', pools);
+          log.debug('STATE', `Fetched ${pools.length} pools`);
+          return pools;
+        }
+      }
+    } catch (e) {
+      log.debug('STATE', `Pool fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    const defaults = this.defaultPools();
+    this.poolCache.set('all', defaults);
+    return defaults;
+  }
+
+  private mapPool(raw: Record<string, unknown>): Pool | null {
+    try {
+      return {
+        name: String(raw['poolName'] ?? ''),
+        address: String(raw['poolAddress'] ?? raw['pubkey'] ?? ''),
+        tvl: Number(raw['totalPoolValueUsd'] ?? raw['tvl'] ?? 0),
+        assets: Array.isArray(raw['assets']) ? raw['assets'] as string[] : [],
+        markets: Number(raw['markets'] ?? 0),
+        utilization: Number(raw['utilization'] ?? 0),
+        lpPrice: Number(raw['lpPrice'] ?? 0),
+        sflpPrice: Number(raw['sflpPrice'] ?? 0),
+        flpPrice: Number(raw['flpPrice'] ?? raw['lpPrice'] ?? 0),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private defaultPools(): Pool[] {
+    return [
       { name: 'Crypto.1', address: 'HfF7GCcEc76xubFCHLLXRdYcgRzwjEPdfKWqzRS8Ncog', tvl: 0, assets: ['USDC', 'SOL', 'BTC', 'ETH'], markets: 11, utilization: 0, lpPrice: 0, sflpPrice: 0, flpPrice: 0 },
       { name: 'Virtual.1', address: 'KwhpybQPe9xuZFmAfcjLHj3ukownWex1ratyascAC1X', tvl: 0, assets: ['USDC', 'XAU', 'XAG', 'EUR', 'GBP'], markets: 14, utilization: 0, lpPrice: 0, sflpPrice: 0, flpPrice: 0 },
       { name: 'Governance.1', address: 'D6bfytnxoZBSzJM7fcixg5sgWJ2hj8SbwkPvb2r8XpbH', tvl: 0, assets: ['USDC', 'JUP', 'PYTH', 'JTO', 'RAY'], markets: 14, utilization: 0, lpPrice: 0, sflpPrice: 0, flpPrice: 0 },
       { name: 'Community.1', address: '6HukhSeVVLQekKaGJYkwztBacjhKLKywVPrmcvccaYMz', tvl: 0, assets: ['USDC', 'BONK', 'PENGU', 'PUMP'], markets: 6, utilization: 0, lpPrice: 0, sflpPrice: 0, flpPrice: 0 },
       { name: 'Equity.1', address: 'Fa64Ua4bzN295egkQEqtyrWNeQMiFZ5Uxfq2DcQ4Sb3h', tvl: 0, assets: ['USDC', 'SPY', 'NVDA', 'TSLA', 'AAPL'], markets: 12, utilization: 0, lpPrice: 0, sflpPrice: 0, flpPrice: 0 },
     ];
-    this.poolCache.set('all', pools);
-    return pools;
   }
+
+  // ─── Prices ───────────────────────────────────────────────────────────
 
   async getPrice(symbol: string): Promise<number> {
     const cached = this.priceCache.get(symbol);
     if (cached !== undefined) return cached;
 
-    // Phase 1: return 0 — will be filled by API in Phase 2
+    if (!this.api) return 0;
+
+    try {
+      const data = await this.api.getPrice(symbol) as Record<string, unknown>;
+      const price = Number(data['priceUi'] ?? data['price'] ?? 0);
+      if (Number.isFinite(price) && price > 0) {
+        this.priceCache.set(symbol, price);
+        return price;
+      }
+    } catch {
+      // Silently return 0
+    }
     return 0;
   }
 
-  async getBalance(_token?: string): Promise<number> {
-    const cached = this.balanceCache.get(_token ?? 'SOL');
+  // ─── Balance ──────────────────────────────────────────────────────────
+
+  async getBalance(token?: string): Promise<number> {
+    const key = token ?? 'SOL';
+    const cached = this.balanceCache.get(key);
     if (cached !== undefined) return cached;
-    return 0;
+
+    if (!this.wallet) return 0;
+
+    try {
+      const balance = await this.wallet.getBalance(token);
+      this.balanceCache.set(key, balance);
+      return balance;
+    } catch {
+      return 0;
+    }
   }
 
   async refresh(): Promise<void> {
