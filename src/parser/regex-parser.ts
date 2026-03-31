@@ -152,6 +152,50 @@ const tradePatterns: PatternMatcher[] = [
     }, raw);
   },
 
+  // ─── Flexible order parser ─────────────────────────────────────────
+  // Handles any word order: "open 2x sol long 10", "open sol long 2x $10 dollars"
+  // Extracts: side, market, leverage, collateral from any position
+  (input, raw, flags) => {
+    // Must start with "open" or contain side keyword
+    if (!/^open\b/i.test(input) && !/\b(long|short|buy|sell)\b/i.test(input)) return null;
+
+    let body = input.replace(/^open\s+/i, '').replace(/\b(?:position|order|trade|with|at|for|a|an|the)\b/gi, ' ').replace(/\s+/g, ' ').trim();
+
+    // Extract side
+    const sideMatch = body.match(/\b(long|short|buy|sell)\b/i);
+    if (!sideMatch) return null;
+    const side = parseSide(sideMatch[1]);
+    if (!side) return null;
+    body = body.replace(/\b(long|short|buy|sell)\b/i, ' ').replace(/\s+/g, ' ').trim();
+
+    // Extract leverage: "2x", "10x", "2.5x"
+    const levMatch = body.match(/\b(\d+(?:\.\d+)?)\s*x\b/i);
+    if (!levMatch) return null;
+    const leverage = parseFloat(levMatch[1]);
+    body = body.replace(/\b\d+(?:\.\d+)?\s*x\b/i, ' ').replace(/\s+/g, ' ').trim();
+
+    // Extract collateral: "$100", "100", "100 dollars", "10 usd"
+    const colMatch = body.match(/\$?(\d+(?:\.\d+)?)\s*(?:dollars?|usd|usdc)?/i);
+    if (!colMatch) return null;
+    const collateral = parseFloat(colMatch[1]);
+    body = body.replace(colMatch[0], ' ').replace(/\s+/g, ' ').trim();
+
+    // Remaining should be the market
+    const market = body.replace(/\b(open|position|order)\b/gi, '').replace(/\s+/g, ' ').trim();
+    if (!market || market.length > 20) return null;
+
+    if (!Number.isFinite(leverage) || leverage < 1) return null;
+    if (!Number.isFinite(collateral) || collateral <= 0) return null;
+
+    return cmd(Action.OpenPosition, {
+      ...flags,
+      side,
+      market: normalizeAsset(market),
+      leverage,
+      collateral,
+    }, raw);
+  },
+
   // "close sol" / "close sol long" / "close all"
   (input, raw, flags) => {
     const m = input.match(/^close\s+(?:(all)|(\w+)(?:\s+(long|short))?(?:\s+(\d+)%)?)/i);
