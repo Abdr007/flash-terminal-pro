@@ -3,16 +3,17 @@
  *
  * Readline-based interactive terminal with:
  *   - Command history
- *   - Tab completion (Phase 2)
+ *   - Mode-aware prompt (SIM vs LIVE)
  *   - Graceful shutdown
- *   - Error isolation (one bad command doesn't kill the REPL)
+ *   - Error isolation
  */
 
 import { createInterface, type Interface } from 'readline';
 import chalk from 'chalk';
 import { CommandRouter } from './router.js';
-import { accentBold, dim } from '../utils/format.js';
+import { dim } from '../utils/format.js';
 import type { FlashXConfig } from '../types/index.js';
+import type { SelectedMode } from './mode-selector.js';
 
 export class Repl {
   private rl: Interface | null = null;
@@ -21,35 +22,34 @@ export class Repl {
   constructor(
     private router: CommandRouter,
     private config: FlashXConfig,
+    private mode: SelectedMode = 'simulation',
   ) {}
 
-  /**
-   * Start the interactive REPL loop.
-   */
   async start(): Promise<void> {
     this.running = true;
 
-    // Banner
-    console.log('');
-    console.log(`  ${accentBold('flash')} ${dim('v0.1.0')}`);
-    console.log(`  ${dim('Protocol-grade CLI for Flash.trade')}`);
-    console.log('');
+    // Mode-specific status line
+    if (this.mode === 'live') {
+      console.log(`  ${chalk.green.bold('●')} ${chalk.green('LIVE')} ${dim('— real trades active')}`);
+    } else {
+      console.log(`  ${chalk.yellow('●')} ${chalk.yellow('SIMULATION')} ${dim('— no real trades')}`);
+    }
 
-    const mode = this.config.simulationMode
-      ? chalk.yellow('SIMULATION')
-      : chalk.green('LIVE');
-    console.log(`  ${dim('Mode:')}    ${mode}`);
     if (this.config.devMode) {
       console.log(`  ${dim('Dev:')}     ${chalk.magenta.bold('DEV_MODE ACTIVE')}`);
     }
-    console.log(`  ${dim('Network:')} ${this.config.network}`);
     console.log(`  ${dim('Type "help" for commands')}`);
     console.log('');
+
+    // Mode-aware prompt
+    const promptStr = this.mode === 'live'
+      ? `${chalk.green('flash')}${chalk.green.bold('●')}${chalk.dim('>')} `
+      : `${chalk.cyan('flash')}${chalk.dim('>')} `;
 
     this.rl = createInterface({
       input: process.stdin,
       output: process.stdout,
-      prompt: `${chalk.cyan('flash')}${chalk.dim('>')} `,
+      prompt: promptStr,
       historySize: 200,
     });
 
@@ -63,7 +63,6 @@ export class Repl {
         return;
       }
 
-      // Exit commands
       if (['exit', 'quit', 'q'].includes(input.toLowerCase())) {
         this.stop();
         return;
@@ -71,9 +70,7 @@ export class Repl {
 
       try {
         const output = await this.router.route(input);
-        if (output) {
-          console.log(output);
-        }
+        if (output) console.log(output);
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         console.log(chalk.red(`  Error: ${msg}`));
@@ -86,7 +83,6 @@ export class Repl {
       this.stop();
     });
 
-    // Keep the process alive
     await new Promise<void>((resolve) => {
       const check = setInterval(() => {
         if (!this.running) {

@@ -4,11 +4,11 @@
  * flash — Protocol-grade CLI for Flash.trade
  *
  * Architecture:
- *   CLI → Router → Parser → ExecutionEngine → RiskEngine → StateEngine → Services
+ *   CLI → ModeSelector → Router → Parser → ExecutionEngine → RiskEngine → StateEngine → Services
  *
  * Entry modes:
- *   1. Interactive REPL (default)
- *   2. Single command: flash "long sol 10x 100"
+ *   1. Interactive REPL (default) — with mode selection prompt
+ *   2. Single command: flash "long sol 10x 100" — uses env mode
  */
 
 import { loadConfig } from './config/index.js';
@@ -16,6 +16,7 @@ import { StateEngine } from './core/state-engine.js';
 import { ExecutionEngine } from './core/execution-engine.js';
 import { CommandRouter } from './cli/router.js';
 import { Repl } from './cli/repl.js';
+import { selectMode } from './cli/mode-selector.js';
 import { FlashApiClient } from './services/api-client.js';
 import { FlashSdkClient } from './services/sdk-client.js';
 import { RpcManager } from './services/rpc-manager.js';
@@ -55,13 +56,11 @@ async function main(): Promise<void> {
   // Start RPC health monitoring
   rpcManager.startHealthMonitor();
 
-  // Initialize execution engine (with RPC manager for health display)
-  const execution = new ExecutionEngine(config, state, api, sdk, wallet, txPipeline, rpcManager);
-  const router = new CommandRouter(execution);
-
-  // Single command mode
+  // ─── Single command mode (uses env SIMULATION_MODE) ─────────────────
   const args = process.argv.slice(2);
   if (args.length > 0) {
+    const execution = new ExecutionEngine(config, state, api, sdk, wallet, txPipeline, rpcManager);
+    const router = new CommandRouter(execution);
     const input = args.join(' ');
     const output = await router.route(input);
     if (output) console.log(output);
@@ -69,8 +68,18 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  // ─── Interactive mode: prompt for mode selection ────────────────────
+  const selectedMode = await selectMode(config, wallet);
+
+  // Apply selected mode to config (mutable override)
+  config.simulationMode = selectedMode === 'simulation';
+
+  // Initialize execution engine with final config
+  const execution = new ExecutionEngine(config, state, api, sdk, wallet, txPipeline, rpcManager);
+  const router = new CommandRouter(execution);
+
   // Interactive REPL
-  const repl = new Repl(router, config);
+  const repl = new Repl(router, config, selectedMode);
 
   const cleanup = () => {
     rpcManager.stopHealthMonitor();
