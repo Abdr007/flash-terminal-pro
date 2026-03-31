@@ -12,15 +12,13 @@ export enum LogLevel {
   Info = 1,
   Warn = 2,
   Error = 3,
-  Success = 4,
 }
 
-const LEVEL_LABELS: Record<LogLevel, string> = {
+const LEVEL_LABELS: Record<number, string> = {
   [LogLevel.Debug]: chalk.gray('DBG'),
   [LogLevel.Info]: chalk.blue('INF'),
   [LogLevel.Warn]: chalk.yellow('WRN'),
   [LogLevel.Error]: chalk.red('ERR'),
-  [LogLevel.Success]: chalk.green('OK '),
 };
 
 class Logger {
@@ -70,7 +68,7 @@ class Logger {
   }
 
   success(module: string, message: string, data?: unknown): void {
-    this.log(LogLevel.Success, module, message, data);
+    this.log(LogLevel.Info, module, message, data);
   }
 }
 
@@ -81,9 +79,10 @@ let _logger: Logger | null = null;
 export function getLogger(): Logger {
   if (!_logger) {
     const envLevel = process.env['LOG_LEVEL']?.toLowerCase();
-    let level = LogLevel.Info;
+    // Default: only show warnings/errors. Set LOG_LEVEL=info or debug for pipeline details.
+    let level = LogLevel.Warn;
     if (envLevel === 'debug') level = LogLevel.Debug;
-    if (envLevel === 'warn') level = LogLevel.Warn;
+    if (envLevel === 'info') level = LogLevel.Info;
     if (envLevel === 'error') level = LogLevel.Error;
     _logger = new Logger(level);
   }
