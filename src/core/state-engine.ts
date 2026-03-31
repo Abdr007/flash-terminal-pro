@@ -102,23 +102,28 @@ export class StateEngine implements IStateEngine {
 
   private mapPosition(raw: Record<string, unknown>): Position | null {
     try {
-      // Flash API enriched position format
+      // Flash API enriched position format (verified field names from /positions/owner/)
       const r = raw as Record<string, unknown>;
+      const sideStr = String(r['sideUi'] ?? r['side'] ?? 'Long');
+
+      // Get mark price from API price data or entry price as fallback
+      const entryPrice = Number(r['entryPriceUi'] ?? r['entryPrice'] ?? 0);
+
       return {
-        pubkey: String(r['pubkey'] ?? r['positionKey'] ?? ''),
-        market: String(r['marketSymbol'] ?? r['symbol'] ?? ''),
-        side: String(r['side']).toUpperCase() === 'SHORT' ? Side.Short : Side.Long,
-        leverage: Number(r['leverage'] ?? 0),
-        sizeUsd: Number(r['sizeUsd'] ?? r['sizeUsdUi'] ?? 0),
-        collateralUsd: Number(r['collateralUsd'] ?? r['collateralUsdUi'] ?? 0),
-        entryPrice: Number(r['entryPrice'] ?? r['entryPriceUi'] ?? 0),
-        markPrice: Number(r['markPrice'] ?? r['markPriceUi'] ?? 0),
-        liquidationPrice: Number(r['liquidationPrice'] ?? r['liquidationPriceUi'] ?? 0),
-        pnl: Number(r['pnl'] ?? r['pnlUsd'] ?? 0),
-        pnlPercent: Number(r['pnlPercent'] ?? 0),
-        fees: Number(r['fees'] ?? r['totalFees'] ?? 0),
-        fundingRate: Number(r['fundingRate'] ?? 0),
-        openTime: Number(r['openTime'] ?? 0),
+        pubkey: String(r['key'] ?? r['pubkey'] ?? r['positionKey'] ?? ''),
+        market: String(r['marketSymbol'] ?? ''),
+        side: sideStr.toLowerCase() === 'short' ? Side.Short : Side.Long,
+        leverage: Number(r['leverageUi'] ?? r['leverage'] ?? 0),
+        sizeUsd: Number(r['sizeUsdUi'] ?? r['sizeUsd'] ?? 0),
+        collateralUsd: Number(r['collateralUsdUi'] ?? r['collateralUsd'] ?? 0),
+        entryPrice,
+        markPrice: entryPrice, // Will be updated by price feed
+        liquidationPrice: Number(r['liquidationPriceUi'] ?? r['liquidationPrice'] ?? 0),
+        pnl: Number(r['pnlWithFeeUsdUi'] ?? r['pnlUsd'] ?? 0),
+        pnlPercent: Number(r['pnlPercentageWithFee'] ?? r['pnlPercent'] ?? 0),
+        fees: 0,
+        fundingRate: 0,
+        openTime: 0,
         pool: String(r['pool'] ?? r['poolName'] ?? ''),
       };
     } catch {

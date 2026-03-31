@@ -17,6 +17,7 @@ import {
   type ParsedCommand,
   type TradeIntent,
   type SwapIntent,
+  type Position,
   type TxResult,
   type LocalQuote,
   type IExecutionEngine,
@@ -460,10 +461,37 @@ export class ExecutionEngine implements IExecutionEngine {
 
   private async handleClose(command: ParsedCommand): Promise<TxResult> {
     const log = getLogger();
-    const { market, side, percent, amount } = command.params;
+    const { market, side } = command.params;
     if (!market) return { success: false, error: err('  Missing market. Usage: close SOL') };
 
-    log.info('ENGINE', `Close: ${market}${side ? ' ' + side : ''}${percent ? ' ' + percent + '%' : ''}`);
+    const pct = command.params.percent;
+    log.info('ENGINE', `Close: ${market}${side ? ' ' + side : ''}${pct ? ' ' + pct + '%' : ''}`);
+
+    // Find existing position
+    const position = await this.state.getPosition(market, side);
+    if (!position) {
+      // Try without side — auto-detect
+      const anyPos = await this.state.getPosition(market);
+      if (!anyPos) {
+        return { success: false, error: err(`  No open ${market} position found`) };
+      }
+      // Use the found position's side
+      return this.executeClose(command, anyPos);
+    }
+
+    return this.executeClose(command, position);
+  }
+
+  private async executeClose(command: ParsedCommand, position: Position): Promise<TxResult> {
+    const log = getLogger();
+    const audit = getAuditLog();
+    const metrics = getMetrics();
+    const { percent, amount } = command.params;
+    const market = position.market;
+    const side = position.side;
+
+    const closePercent = percent ?? 100;
+    const closeUsd = amount ?? position.sizeUsd;
 
     const lines = [
       '',
@@ -471,14 +499,86 @@ export class ExecutionEngine implements IExecutionEngine {
       `  ${dim('─'.repeat(48))}`,
       '',
       `  ${dim('Action:')}  ${chalk.bold('CLOSE POSITION')}`,
-      `  ${dim('Market:')}  ${chalk.white.bold(market)}${side ? ' ' + colorSide(side) : ''}`,
+      `  ${dim('Market:')}  ${chalk.white.bold(market)} ${colorSide(side)}`,
+      `  ${dim('Size:')}    ${formatUsd(position.sizeUsd)}`,
+      `  ${dim('Entry:')}   ${formatPrice(position.entryPrice)}`,
+      `  ${dim('PnL:')}     ${colorPnl(position.pnl)} ${dim(`(${position.pnlPercent.toFixed(2)}%)`)}`,
+      `  ${dim('Close:')}   ${chalk.white.bold(closePercent + '%')}`,
+      `  ${dim('─'.repeat(48))}`,
     ];
-    if (percent) lines.push(`  ${dim('Close:')}   ${chalk.white.bold(percent + '%')}`);
-    else if (amount) lines.push(`  ${dim('Amount:')}  ${chalk.white.bold(formatUsd(amount))}`);
-    else lines.push(`  ${dim('Close:')}   ${chalk.white.bold('100%')}`);
-    lines.push(`  ${dim('─'.repeat(48))}`, '');
 
-    return { success: true, error: lines.join('\n') };
+    // Simulation mode: stop at preview
+    if (this.config.simulationMode) {
+      lines.push(`  ${dim('[SIMULATION MODE — no real transaction]')}`, '');
+      audit.log({ timestamp: new Date().toISOString(), action: 'close_position', command: command.raw, market, side, sizeUsd: position.sizeUsd, status: 'preview' });
+      return { success: true, error: lines.join('\n') };
+    }
+
+    if (!this.wallet.isConnected || !this.wallet.keypair) {
+      lines.push(`  ${err('Wallet not connected')}`, '');
+      return { success: false, error: lines.join('\n') };
+    }
+
+    // Build close transaction via API
+    log.info('ENGINE', 'Building close position transaction...');
+    const startMs = Date.now();
+    let txBase64: string;
+    try {
+      const buildResult = await this.api.buildClosePosition({
+        positionKey: position.pubkey,
+        inputUsdUi: String(closeUsd),
+        withdrawTokenSymbol: 'USDC',
+        owner: this.wallet.publicKey!.toBase58(),
+      }) as Record<string, unknown>;
+
+      if (buildResult['err']) {
+        return { success: false, error: err(`  Close build failed: ${buildResult['err']}`) };
+      }
+      const tx64 = buildResult['transactionBase64'] as string | undefined;
+      if (!tx64) {
+        return { success: false, error: err('  API returned no transaction') };
+      }
+      txBase64 = tx64;
+    } catch (e) {
+      return { success: false, error: err(`  Close build failed: ${e instanceof Error ? e.message : String(e)}`) };
+    }
+
+    // Execute through pipeline
+    const tradeKey = `close:${market}:${side}`;
+    const intentParams = { action: 'close', market, side, closePercent, ts: Math.floor(Date.now() / 1000) };
+    const rebuildFn = async (): Promise<string | null> => {
+      try {
+        const rebuild = await this.api.buildClosePosition({
+          positionKey: position.pubkey,
+          inputUsdUi: String(closeUsd),
+          withdrawTokenSymbol: 'USDC',
+          owner: this.wallet.publicKey!.toBase58(),
+        }) as Record<string, unknown>;
+        return (rebuild['transactionBase64'] as string) ?? null;
+      } catch { return null; }
+    };
+
+    log.info('ENGINE', 'Executing close through pipeline...');
+    const txResult = await this.txPipeline.execute(txBase64, this.wallet.keypair, tradeKey, intentParams, rebuildFn);
+    const durationMs = Date.now() - startMs;
+
+    if (!txResult.success) {
+      lines.push('', `  ${err('Close failed:')} ${txResult.error}`, '');
+      metrics.recordTradeFailed();
+      audit.log({ timestamp: new Date().toISOString(), action: 'close_position', command: command.raw, market, side, sizeUsd: position.sizeUsd, txHash: txResult.signature, status: 'failed', error: txResult.error, durationMs });
+      return { success: false, error: lines.join('\n'), signature: txResult.signature };
+    }
+
+    lines.push('');
+    lines.push(`  ${chalk.green('✓')} Position closed: ${txResult.signature?.slice(0, 16)}...`);
+    lines.push(`  ${dim(`Duration: ${durationMs}ms`)}`);
+    lines.push('');
+
+    metrics.recordTradeSuccess(durationMs);
+    audit.log({ timestamp: new Date().toISOString(), action: 'close_position', command: command.raw, market, side, sizeUsd: position.sizeUsd, txHash: txResult.signature, status: 'confirmed', durationMs });
+
+    log.success('ENGINE', `Close complete: ${txResult.signature?.slice(0, 16)}... (${durationMs}ms)`);
+    return { success: true, signature: txResult.signature, error: lines.join('\n') };
   }
 
   private async handleReverse(command: ParsedCommand): Promise<TxResult> {
