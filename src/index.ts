@@ -36,12 +36,39 @@ async function main(): Promise<void> {
   const rpcManager = new RpcManager(config);
   const wallet = new WalletManager(config);
 
-  // Try to load wallet if keypair path is configured
+  // Try to load wallet: KEYPAIR_PATH → WalletStore default → auto-detect
   if (config.keypairPath) {
     try {
       wallet.loadFromFile();
     } catch (e) {
-      log.warn('BOOT', `Wallet load failed: ${e instanceof Error ? e.message : String(e)}`);
+      log.warn('BOOT', `KEYPAIR_PATH wallet failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  if (!wallet.isConnected) {
+    // Try WalletStore
+    const { WalletStore } = await import('./wallet/store.js');
+    const store = new WalletStore();
+    const defaultName = store.getDefault();
+    if (defaultName) {
+      try {
+        const entry = store.get(defaultName);
+        if (entry) {
+          wallet.loadFromFile(entry.path);
+          log.info('BOOT', `Loaded wallet "${defaultName}": ${wallet.shortAddress}`);
+        }
+      } catch (e) {
+        log.debug('BOOT', `WalletStore default failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    // Auto-detect system keypair
+    if (!wallet.isConnected) {
+      const detected = store.autoDetect();
+      if (detected) {
+        try {
+          wallet.loadFromFile(detected.path);
+          log.info('BOOT', `Auto-detected wallet: ${wallet.shortAddress}`);
+        } catch { /* ignore */ }
+      }
     }
   }
 

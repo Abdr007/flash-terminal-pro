@@ -211,15 +211,32 @@ export class RiskEngine {
 
   private async checkBalance(intent: TradeIntent): Promise<RiskCheck> {
     try {
-      const balance = await this.state.getBalance(intent.collateralToken);
-      if (balance < intent.collateral) {
-        return block(
-          'balance',
-          `Insufficient ${intent.collateralToken}: have $${balance.toFixed(2)}, need $${intent.collateral.toFixed(2)}`,
-          balance, intent.collateral
-        );
+      const tokenBalance = await this.state.getBalance(intent.collateralToken);
+
+      // Stablecoins: balance IS the USD value (1:1)
+      if (intent.collateralToken === 'USDC' || intent.collateralToken === 'USDT') {
+        if (tokenBalance < intent.collateral) {
+          return block('balance',
+            `Insufficient ${intent.collateralToken}: have $${tokenBalance.toFixed(2)}, need $${intent.collateral.toFixed(2)}`,
+            tokenBalance, intent.collateral);
+        }
+        return pass('balance', `$${tokenBalance.toFixed(2)} ${intent.collateralToken} sufficient`);
       }
-      return pass('balance', `${intent.collateralToken} balance sufficient`);
+
+      // Non-stablecoin (SOL, BTC, etc.): convert token balance to USD via live price
+      const price = await this.state.getPrice(intent.collateralToken);
+      if (price > 0) {
+        const balanceUsd = tokenBalance * price;
+        if (balanceUsd < intent.collateral) {
+          return block('balance',
+            `Insufficient ${intent.collateralToken}: have ${tokenBalance.toFixed(4)} ($${balanceUsd.toFixed(2)}), need $${intent.collateral.toFixed(2)}`,
+            balanceUsd, intent.collateral);
+        }
+        return pass('balance', `${tokenBalance.toFixed(4)} ${intent.collateralToken} ($${balanceUsd.toFixed(2)}) sufficient`);
+      }
+
+      // No price — allow with warning (on-chain will reject if insufficient)
+      return warning('balance', `Cannot price ${intent.collateralToken} — balance unverified`);
     } catch {
       return warning('balance', 'Could not verify balance — state unavailable');
     }

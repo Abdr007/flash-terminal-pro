@@ -80,7 +80,7 @@ export async function selectMode(
     console.log(`  ${chalk.red('Real transactions will be signed and sent on-chain.')}`);
     console.log('');
     const confirm = await ask(`  ${chalk.yellow('Type CONFIRM to proceed, or Enter for simulation:')} `);
-    if (confirm === 'CONFIRM') {
+    if (confirm.toUpperCase() === 'CONFIRM') {
       console.log(`  ${chalk.green.bold('LIVE MODE ACTIVATED')}`);
       console.log('');
       return 'live';
@@ -149,7 +149,7 @@ export async function selectMode(
 
   const confirm = await ask(`  ${chalk.yellow.bold('Type CONFIRM to proceed:')} `);
 
-  if (confirm !== 'CONFIRM') {
+  if (confirm.toUpperCase() !== 'CONFIRM') {
     console.log('');
     console.log(`  ${dim('Confirmation not received. Staying in SIMULATION mode.')}`);
     console.log('');
