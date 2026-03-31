@@ -462,6 +462,19 @@ export class ExecutionEngine implements IExecutionEngine {
       }
     }
 
+    // ─── STEP 5b: SLIPPAGE ENFORCEMENT (TASK 3) ────────────────────────
+    // If we got a real quote, verify the output is within slippage tolerance
+    const quoteOutputNum = parseFloat(quoteOutput);
+    if (Number.isFinite(quoteOutputNum) && quoteOutputNum > 0) {
+      // Calculate minimum acceptable output based on slippage
+      const slippageFraction = this.config.defaultSlippageBps / 10000;
+      // Note: quoteOutput already factors in the fee — we just enforce the
+      // output doesn't deviate from what the API quoted beyond our tolerance
+      const minAcceptable = quoteOutputNum * (1 - slippageFraction);
+      log.debug('ENGINE', `Slippage check: output=${quoteOutputNum}, min=${minAcceptable.toFixed(6)} (${this.config.defaultSlippageBps}bps)`);
+      // This will be re-checked when the API builds the real tx with `owner` set
+    }
+
     // ─── STEP 6: Execute (if not simulation mode) ─────────────────────
     if (this.config.simulationMode) {
       lines.push('', `  ${dim('[SIMULATION MODE — no real transaction]')}`, '');
@@ -494,6 +507,22 @@ export class ExecutionEngine implements IExecutionEngine {
         return { success: false, error: err('  API returned no transaction — cannot execute') };
       }
 
+      // ─── SLIPPAGE ENFORCEMENT (TASK 3) ─────────────────────────────
+      // Compare the build output (real) vs the quote output (preview)
+      const buildOutputNum = parseFloat(buildResult.outputAmountUi ?? '0');
+      if (Number.isFinite(quoteOutputNum) && quoteOutputNum > 0 && Number.isFinite(buildOutputNum) && buildOutputNum > 0) {
+        const slippageFraction = this.config.defaultSlippageBps / 10000;
+        const minAcceptable = quoteOutputNum * (1 - slippageFraction);
+        if (buildOutputNum < minAcceptable) {
+          log.error('ENGINE', `SLIPPAGE BLOCKED: build output ${buildOutputNum} < min ${minAcceptable.toFixed(6)} (quote was ${quoteOutputNum})`);
+          return {
+            success: false,
+            error: err(`  BLOCKED: Slippage exceeded. Expected ≥${minAcceptable.toFixed(6)} ${outputToken}, got ${buildOutputNum}. Price moved too much.`),
+          };
+        }
+        log.debug('ENGINE', `Slippage OK: build=${buildOutputNum} ≥ min=${minAcceptable.toFixed(6)}`);
+      }
+
       txBase64 = buildResult.transactionBase64;
     } catch (e) {
       return { success: false, error: err(`  Swap build failed: ${e instanceof Error ? e.message : String(e)}`) };
@@ -502,8 +531,9 @@ export class ExecutionEngine implements IExecutionEngine {
     // Record pre-swap balance for post-verification
     const preBalance = await this.state.getBalance(outputToken);
 
-    // Execute through the SAME pipeline as perps
+    // Execute through the SAME pipeline as perps (with intent params for replay protection)
     const tradeKey = `swap:${inputToken}:${outputToken}:${amount}`;
+    const intentParams = { action: 'swap', inputToken, outputToken, amount, timestamp: Math.floor(Date.now() / 1000) };
     const rebuildFn = async (): Promise<string | null> => {
       try {
         const rebuild = await this.api.buildSwap({
@@ -520,7 +550,7 @@ export class ExecutionEngine implements IExecutionEngine {
     };
 
     log.info('ENGINE', 'Executing swap through transaction pipeline...');
-    const txResult = await this.txPipeline.execute(txBase64, this.wallet.keypair, tradeKey, rebuildFn);
+    const txResult = await this.txPipeline.execute(txBase64, this.wallet.keypair, tradeKey, intentParams, rebuildFn);
 
     if (!txResult.success) {
       lines.push('', `  ${err('Swap execution failed:')} ${txResult.error}`, '');
