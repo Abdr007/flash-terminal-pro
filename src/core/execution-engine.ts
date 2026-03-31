@@ -307,24 +307,150 @@ export class ExecutionEngine implements IExecutionEngine {
       lines.push('');
     }
 
-    // Mode indicator
-    if (this.config.devMode) {
-      lines.push(`  ${chalk.magenta.bold('DEV MODE')} — pipeline testing active`);
-    }
+    // ─── SIMULATION: stop at preview ───────────────────────────────────
     if (this.config.simulationMode) {
+      if (this.config.devMode) {
+        lines.push(`  ${chalk.magenta.bold('DEV MODE')} — pipeline testing active`);
+      }
       lines.push(`  ${dim('[SIMULATION MODE — no real transaction]')}`);
+      lines.push('');
+      audit.log({
+        timestamp: new Date().toISOString(), action: 'open_position', command: command.raw,
+        market, side, leverage, collateral, sizeUsd: intent.sizeUsd,
+        fees: estFee, pool, slippageBps: this.config.defaultSlippageBps, status: 'preview',
+      });
+      log.success('ENGINE', `Preview displayed: ${market} ${side} ${leverage}x ${formatUsd(collateral)}`);
+      return { success: true, error: lines.join('\n') };
+    }
+
+    // ─── LIVE MODE: full execution ──────────────────────────────────────
+
+    if (!this.wallet.isConnected || !this.wallet.keypair) {
+      lines.push('', `  ${err('Wallet not connected — cannot execute trade')}`, '');
+      return { success: false, error: lines.join('\n') };
+    }
+
+    // Build transaction via API
+    log.info('ENGINE', 'Building open position transaction...');
+    const startMs = Date.now();
+    let txBase64: string;
+    try {
+      const inputToken = intent.collateralToken;
+      const outputToken = intent.side === 'LONG' ? intent.market : 'USDC';
+      const buildResult = await this.api.buildOpenPosition({
+        inputTokenSymbol: inputToken,
+        outputTokenSymbol: outputToken,
+        inputAmountUi: String(collateral),
+        leverage,
+        tradeType: intent.side === 'LONG' ? 'LONG' : 'SHORT',
+        owner: this.wallet.publicKey!.toBase58(),
+        slippageBps: this.config.defaultSlippageBps,
+        takeProfitPrice: takeProfit,
+        stopLossPrice: stopLoss,
+      });
+
+      if (buildResult.err) {
+        audit.log({ timestamp: new Date().toISOString(), action: 'open_position', command: command.raw, market, side, leverage, collateral, status: 'failed', error: buildResult.err });
+        return { success: false, error: err(`  Trade build failed: ${buildResult.err}`) };
+      }
+      if (!buildResult.transactionBase64) {
+        return { success: false, error: err('  API returned no transaction') };
+      }
+
+      // Cross-validate API quote vs SDK quote (when both have valid numbers)
+      const apiFee = Number(buildResult.entryFee);
+      const apiLev = Number(buildResult.newLeverage);
+      if (sdkQuote.openFee > 0 && Number.isFinite(apiFee) && apiFee > 0) {
+        const validation = this.validateApiQuote(
+          { entryFee: apiFee, newLeverage: Number.isFinite(apiLev) ? apiLev : 0 },
+          sdkQuote,
+        );
+        if (!validation.valid) {
+          log.warn('ENGINE', `Cross-validation: ${validation.divergences.join('; ')}`);
+          lines.push(`  ${chalk.yellow('⚠')} Quote divergence: ${validation.divergences.join('; ')}`);
+        }
+      }
+
+      txBase64 = buildResult.transactionBase64;
+    } catch (e) {
+      return { success: false, error: err(`  Trade build failed: ${e instanceof Error ? e.message : String(e)}`) };
+    }
+
+    // Pre-execution state snapshot
+    const consistency = new StateConsistency(this.state);
+    const preSnapshot = await consistency.snapshot([intent.collateralToken]);
+
+    // Execute through the hardened pipeline
+    const tradeKey = `open:${market}:${side}:${collateral}`;
+    const intentParams = { action: 'open', market, side, leverage, collateral, ts: Math.floor(Date.now() / 1000) };
+    const rebuildFn = async (): Promise<string | null> => {
+      try {
+        const rebuild = await this.api.buildOpenPosition({
+          inputTokenSymbol: intent.collateralToken,
+          outputTokenSymbol: intent.side === 'LONG' ? intent.market : 'USDC',
+          inputAmountUi: String(collateral),
+          leverage,
+          tradeType: intent.side === 'LONG' ? 'LONG' : 'SHORT',
+          owner: this.wallet.publicKey!.toBase58(),
+          slippageBps: this.config.defaultSlippageBps,
+        });
+        return rebuild.transactionBase64 ?? null;
+      } catch { return null; }
+    };
+
+    log.info('ENGINE', 'Executing through transaction pipeline...');
+    const txResult = await this.txPipeline.execute(txBase64, this.wallet.keypair, tradeKey, intentParams, rebuildFn);
+    const durationMs = Date.now() - startMs;
+
+    if (!txResult.success) {
+      lines.push('', `  ${err('Execution failed:')} ${txResult.error}`, '');
+      metrics.recordTradeFailed();
+      audit.log({
+        timestamp: new Date().toISOString(), action: 'open_position', command: command.raw,
+        market, side, leverage, collateral, sizeUsd: intent.sizeUsd,
+        txHash: txResult.signature, status: 'failed', error: txResult.error, durationMs, pool,
+      });
+      return { success: false, error: lines.join('\n'), signature: txResult.signature };
+    }
+
+    // Post-execution verification
+    const { PostVerifier } = await import('../tx/post-verify.js');
+    const verifier = new PostVerifier(this.state);
+    const verification = await verifier.verifyOpenPosition(market, side, intent.sizeUsd);
+
+    // State consistency check
+    const consistencyResult = await consistency.verifyAfterTrade(preSnapshot, [
+      { type: 'balance_decrease', token: intent.collateralToken },
+      { type: 'position_opened', token: intent.collateralToken, market, side },
+    ]);
+
+    const auditStatus = consistencyResult.consistent ? 'confirmed' : 'inconsistent';
+
+    lines.push('');
+    lines.push(`  ${chalk.green('✓')} Trade executed: ${txResult.signature?.slice(0, 16)}...`);
+    lines.push(`  ${dim(`Duration: ${durationMs}ms`)}`);
+
+    if (verification.verified) {
+      lines.push(`  ${dim(verification.details)}`);
+    } else {
+      lines.push(`  ${chalk.yellow('⚠')} ${verification.details}`);
+    }
+
+    if (!consistencyResult.consistent) {
+      lines.push(`  ${chalk.red('⚠ STATE INCONSISTENCY DETECTED')}`);
     }
     lines.push('');
 
+    metrics.recordTradeSuccess(durationMs);
     audit.log({
       timestamp: new Date().toISOString(), action: 'open_position', command: command.raw,
       market, side, leverage, collateral, sizeUsd: intent.sizeUsd,
-      fees: estFee, pool, slippageBps: this.config.defaultSlippageBps,
-      status: 'preview',
+      fees: estFee, txHash: txResult.signature, status: auditStatus,
+      durationMs, pool, slippageBps: this.config.defaultSlippageBps, retryCount: txResult.retryCount,
     });
 
-    log.success('ENGINE', `Preview displayed: ${market} ${side} ${leverage}x ${formatUsd(collateral)}`);
-    return { success: true, error: lines.join('\n') };
+    log.success('ENGINE', `Trade complete: ${txResult.signature?.slice(0, 16)}... (${durationMs}ms)`);
+    return { success: true, signature: txResult.signature, fees: estFee, error: lines.join('\n') };
   }
 
   private async handleClose(command: ParsedCommand): Promise<TxResult> {
