@@ -56,6 +56,7 @@ export enum Action {
   ViewFees = 'view_fees',
   ViewHours = 'view_hours',
   ViewBalance = 'view_balance',
+  ViewTrades = 'view_trades',
 
   // Wallet
   WalletCreate = 'wallet_create',

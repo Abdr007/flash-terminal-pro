@@ -336,6 +336,7 @@ const viewPatterns: PatternMatcher[] = [
     if (/^(?:fees?)$/i.test(input)) return cmd(Action.ViewFees, flags, raw);
     if (/^(?:hours|schedule|market\s*hours)$/i.test(input)) return cmd(Action.ViewHours, flags, raw);
     if (/^(?:balance|bal)$/i.test(input)) return cmd(Action.ViewBalance, flags, raw);
+    if (/^(?:trades?|history|journal|trade\s*history)$/i.test(input)) return cmd(Action.ViewTrades, flags, raw);
     return null;
   },
 

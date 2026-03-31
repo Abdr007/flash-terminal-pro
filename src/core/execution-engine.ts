@@ -35,6 +35,8 @@ import { PostVerifier } from '../tx/post-verify.js';
 import { checkQuoteFreshness, checkPriceDrift, type TimedQuote } from '../tx/quote-guard.js';
 import { getAuditLog, type AuditRecord } from '../security/audit-log.js';
 import { StateConsistency } from './state-consistency.js';
+import { getMetrics } from './metrics.js';
+import { ErrorCode } from '../types/errors.js';
 import {
   formatUsd,
   formatPrice,
@@ -155,6 +157,8 @@ export class ExecutionEngine implements IExecutionEngine {
         return this.handleViewPools();
       case Action.ViewBalance:
         return this.handleViewBalance();
+      case Action.ViewTrades:
+        return this.handleTradeHistory();
       case Action.ViewOrders:
       case Action.ViewFunding:
       case Action.ViewOI:
@@ -208,12 +212,15 @@ export class ExecutionEngine implements IExecutionEngine {
 
   private async handleOpen(command: ParsedCommand): Promise<TxResult> {
     const log = getLogger();
+    const audit = getAuditLog();
+    const metrics = getMetrics();
     const { market, side, leverage, collateral, takeProfit, stopLoss, degen, collateralToken } = command.params;
 
     if (!market || !side || !leverage || !collateral) {
-      return { success: false, error: err('  Missing parameters. Usage: long SOL 10x $100') };
+      return { success: false, error: err(`  [${ErrorCode.MISSING_PARAMS}] Missing parameters. Usage: long SOL 10x $100`) };
     }
 
+    metrics.recordTradeAttempt();
     log.info('ENGINE', `Open: ${market} ${side} ${leverage}x $${collateral}`);
 
     // Resolve pool and collateral token from protocol rules
@@ -240,6 +247,12 @@ export class ExecutionEngine implements IExecutionEngine {
 
     if (!risk.allowed) {
       log.warn('ENGINE', `Trade blocked: ${risk.summary}`);
+      metrics.recordTradeBlocked();
+      audit.log({
+        timestamp: new Date().toISOString(), action: 'open_position', command: command.raw,
+        market, side, leverage, collateral, sizeUsd: collateral * leverage,
+        pool, status: 'blocked', error: risk.summary,
+      });
       const lines = [
         '',
         `  ${err('TRADE BLOCKED')}`,
@@ -296,6 +309,13 @@ export class ExecutionEngine implements IExecutionEngine {
       lines.push(`  ${dim('[SIMULATION MODE — no real transaction]')}`);
     }
     lines.push('');
+
+    audit.log({
+      timestamp: new Date().toISOString(), action: 'open_position', command: command.raw,
+      market, side, leverage, collateral, sizeUsd: intent.sizeUsd,
+      fees: estFee, pool, slippageBps: this.config.defaultSlippageBps,
+      status: 'preview',
+    });
 
     log.success('ENGINE', `Preview displayed: ${market} ${side} ${leverage}x ${formatUsd(collateral)}`);
     return { success: true, error: lines.join('\n') };
@@ -363,12 +383,14 @@ export class ExecutionEngine implements IExecutionEngine {
   private async handleSwap(command: ParsedCommand): Promise<TxResult> {
     const log = getLogger();
     const audit = getAuditLog();
+    const metrics = getMetrics();
     const { inputToken, outputToken, amount } = command.params;
 
     if (!inputToken || !outputToken || !amount) {
       return { success: false, error: err('  Usage: swap 50 USDC to SOL') };
     }
 
+    metrics.recordSwapAttempt();
     log.info('ENGINE', `Swap: ${amount} ${inputToken} → ${outputToken}`);
 
     // ─── STEP 1: Resolve swap pool ────────────────────────────────────
@@ -618,6 +640,7 @@ export class ExecutionEngine implements IExecutionEngine {
       retryCount: txResult.retryCount,
     });
 
+    metrics.recordSwapSuccess(durationMs);
     log.success('ENGINE', `Swap complete: ${txResult.signature?.slice(0, 16)}... (${durationMs}ms)`);
 
     return {
@@ -758,6 +781,42 @@ export class ExecutionEngine implements IExecutionEngine {
     return { success: true, error: dim('  Wallet balance — connect wallet in Phase 2') };
   }
 
+  // ─── Trade History ────────────────────────────────────────────────────
+
+  private handleTradeHistory(): TxResult {
+    const audit = getAuditLog();
+    const records = audit.readRecent(20);
+
+    if (records.length === 0) {
+      return { success: true, error: dim('  No trade history yet.') };
+    }
+
+    const lines = [
+      '',
+      `  ${accentBold('TRADE HISTORY')}  ${dim(`(last ${records.length})`)}`,
+      '',
+      dim(`  ${pad('Time', 12)} ${pad('Action', 8)} ${pad('Market', 10)} ${pad('Amount', 12)} ${pad('Status', 12)} ${pad('Tx', 16)}`),
+      dim('  ' + '─'.repeat(74)),
+    ];
+
+    for (const r of records.reverse()) {
+      const time = r.timestamp.slice(11, 19); // HH:mm:ss
+      const action = (r.action ?? '').slice(0, 7);
+      const market = r.market ?? r.inputToken ?? '';
+      const amount = r.inputAmount != null ? formatUsd(r.inputAmount) : '—';
+      const statusColor = r.status === 'confirmed' ? ok(r.status)
+        : r.status === 'failed' || r.status === 'blocked' ? err(r.status)
+        : r.status === 'inconsistent' ? chalk.red(r.status)
+        : dim(r.status);
+      const tx = r.txHash ? r.txHash.slice(0, 12) + '...' : dim('—');
+
+      lines.push(`  ${dim(time)} ${pad(action, 8)} ${pad(market, 10)} ${pad(amount, 12)} ${pad(statusColor, 12)} ${tx}`);
+    }
+
+    lines.push('');
+    return { success: true, error: lines.join('\n') };
+  }
+
   // ─── System Handlers ──────────────────────────────────────────────────
 
   private async handleHealth(): Promise<TxResult> {
@@ -788,6 +847,19 @@ export class ExecutionEngine implements IExecutionEngine {
       const msg = e instanceof Error ? e.message : String(e);
       lines.push(`  ${dim('API Status:')} ${err('UNREACHABLE')} ${dim(msg.substring(0, 40))}`);
       log.warn('HEALTH', `API unreachable: ${msg}`);
+    }
+
+    // Execution metrics
+    const m = getMetrics().snapshot();
+    if (m.tradesAttempted > 0 || m.swapsAttempted > 0) {
+      lines.push('');
+      lines.push(`  ${accentBold('METRICS')}`);
+      lines.push(`  ${dim('Trades:')}     ${m.tradesSucceeded}/${m.tradesAttempted} succeeded, ${m.tradesBlocked} blocked`);
+      lines.push(`  ${dim('Swaps:')}      ${m.swapsSucceeded}/${m.swapsAttempted} succeeded`);
+      if (m.avgExecutionMs > 0) lines.push(`  ${dim('Avg Exec:')}   ${m.avgExecutionMs}ms`);
+      if (m.lastTradeAt) lines.push(`  ${dim('Last Trade:')} ${m.lastTradeAt}`);
+      const uptimeMin = Math.floor(m.uptimeMs / 60_000);
+      lines.push(`  ${dim('Uptime:')}     ${uptimeMin}m`);
     }
 
     lines.push('');
@@ -829,6 +901,7 @@ export class ExecutionEngine implements IExecutionEngine {
       `    prices                     Price feed`,
       `    pools                      Pool overview`,
       `    balance                    Wallet balance`,
+      `    trades / history           Trade history`,
       '',
       `  ${chalk.cyan('SYSTEM')}`,
       `    health                     System status`,
