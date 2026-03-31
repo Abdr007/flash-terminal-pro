@@ -16,6 +16,7 @@ import {
   Action,
   type ParsedCommand,
   type TradeIntent,
+  type SwapIntent,
   type TxResult,
   type LocalQuote,
   type IExecutionEngine,
@@ -29,7 +30,8 @@ import type { FlashSdkClient } from '../services/sdk-client.js';
 import { crossValidateQuotes } from '../services/sdk-client.js';
 import type { WalletManager } from '../wallet/manager.js';
 import type { TxPipeline } from '../tx/pipeline.js';
-import { resolvePool, resolveCollateralToken } from '../services/pool-resolver.js';
+import { resolvePool, resolveCollateralToken, resolveSwapPool } from '../services/pool-resolver.js';
+import { PostVerifier } from '../tx/post-verify.js';
 import {
   formatUsd,
   formatPrice,
@@ -353,34 +355,202 @@ export class ExecutionEngine implements IExecutionEngine {
     return { success: true, error: dim(`  Order (${command.action}) — Phase 2`) };
   }
 
-  // ─── Swap Handler ─────────────────────────────────────────────────────
+  // ─── Swap Handler (FULL PIPELINE) ──────────────────────────────────────
 
   private async handleSwap(command: ParsedCommand): Promise<TxResult> {
     const log = getLogger();
     const { inputToken, outputToken, amount } = command.params;
+
     if (!inputToken || !outputToken || !amount) {
       return { success: false, error: err('  Usage: swap 50 USDC to SOL') };
     }
 
     log.info('ENGINE', `Swap: ${amount} ${inputToken} → ${outputToken}`);
 
-    // Estimate swap fee (base 0.02% + pool ratio fee ~0.05%)
-    const estSwapFee = amount * 0.0007;
+    // ─── STEP 1: Resolve swap pool ────────────────────────────────────
+    const pool = resolveSwapPool(inputToken, outputToken);
+    if (!pool) {
+      return {
+        success: false,
+        error: err(`  No pool found with both ${inputToken} and ${outputToken}. Swap not supported.`),
+      };
+    }
+
+    // ─── STEP 2: Build swap intent ────────────────────────────────────
+    const intent: SwapIntent = {
+      action: Action.Swap,
+      inputToken,
+      outputToken,
+      amountIn: amount,
+      slippageBps: this.config.defaultSlippageBps,
+      pool,
+    };
+
+    // ─── STEP 3: Risk evaluation ──────────────────────────────────────
+    const risk = await this.risk.evaluateSwap(intent);
+
+    if (!risk.allowed) {
+      log.warn('ENGINE', `Swap blocked: ${risk.summary}`);
+      const lines = [
+        '',
+        `  ${err('SWAP BLOCKED')}`,
+        '',
+        ...risk.checks
+          .filter(c => c.status !== 'SAFE')
+          .map(c => `  ${c.status === 'BLOCKED' ? chalk.red('✗') : chalk.yellow('⚠')} ${c.message}`),
+        '',
+      ];
+      return { success: false, error: lines.join('\n') };
+    }
+
+    // ─── STEP 4: Get API quote (preview) ──────────────────────────────
+    let quoteOutput = '?';
+    let quoteFee = 0;
+    let quotePayUsd = '';
+    let quoteReceiveUsd = '';
+
+    try {
+      const quote = await this.api.getSwapQuote({
+        inputTokenSymbol: inputToken,
+        outputTokenSymbol: outputToken,
+        inputAmountUi: String(amount),
+      });
+
+      if (quote.err) {
+        log.warn('ENGINE', `Swap quote error: ${quote.err}`);
+        return { success: false, error: err(`  Swap quote failed: ${quote.err}`) };
+      }
+
+      quoteOutput = quote.outputAmountUi ?? quote.outputAmount ?? '?';
+      quoteFee = quote.entryFee ?? 0;
+      quotePayUsd = quote.youPayUsdUi ?? '';
+      quoteReceiveUsd = quote.youReceiveUsdUi ?? '';
+
+      log.debug('ENGINE', `Swap quote: ${amount} ${inputToken} → ${quoteOutput} ${outputToken}, fee=$${quoteFee}`);
+    } catch (e) {
+      log.warn('ENGINE', `Swap quote fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+      // In simulation/dev mode, allow preview without API quote
+      if (!this.config.simulationMode && !this.config.devMode) {
+        return { success: false, error: err(`  Failed to fetch swap quote: ${e instanceof Error ? e.message : String(e)}`) };
+      }
+    }
+
+    // ─── STEP 5: Display preview ──────────────────────────────────────
+    const estFee = quoteFee > 0 ? quoteFee : amount * 0.0007;
+
+    const lines = [
+      '',
+      `  ${accentBold('SWAP PREVIEW')}`,
+      `  ${dim('─'.repeat(48))}`,
+      '',
+      `  ${dim('Action:')}    ${chalk.bold('SWAP')}`,
+      `  ${dim('From:')}      ${chalk.white.bold(String(amount))} ${chalk.white.bold(inputToken)}`,
+      `  ${dim('To:')}        ${chalk.white.bold(quoteOutput)} ${chalk.white.bold(outputToken)}`,
+      `  ${dim('Pool:')}      ${dim(pool)}`,
+      `  ${dim('Est. Fee:')}  ${chalk.yellow(formatUsd(estFee))}`,
+    ];
+
+    if (quotePayUsd) lines.push(`  ${dim('You Pay:')}   ${dim(quotePayUsd + ' USD')}`);
+    if (quoteReceiveUsd) lines.push(`  ${dim('You Get:')}   ${dim(quoteReceiveUsd + ' USD')}`);
+    lines.push(`  ${dim('Slippage:')}  ${dim(this.config.defaultSlippageBps + ' bps')}`);
+    lines.push(`  ${dim('─'.repeat(48))}`);
+
+    // Risk warnings
+    if (risk.mustConfirm) {
+      for (const c of risk.checks.filter(c => c.status === 'WARNING')) {
+        lines.push(`  ${chalk.yellow('⚠')} ${c.message}`);
+      }
+    }
+
+    // ─── STEP 6: Execute (if not simulation mode) ─────────────────────
+    if (this.config.simulationMode) {
+      lines.push('', `  ${dim('[SIMULATION MODE — no real transaction]')}`, '');
+      log.success('ENGINE', `Swap preview: ${amount} ${inputToken} → ${quoteOutput} ${outputToken}`);
+      return { success: true, error: lines.join('\n') };
+    }
+
+    // Live execution requires wallet
+    if (!this.wallet.isConnected || !this.wallet.keypair) {
+      lines.push('', `  ${err('Wallet not connected — cannot execute swap')}`, '');
+      return { success: false, error: lines.join('\n') };
+    }
+
+    // Build transaction via API (with owner for co-signing)
+    log.info('ENGINE', 'Building swap transaction...');
+    let txBase64: string;
+    try {
+      const buildResult = await this.api.buildSwap({
+        inputTokenSymbol: inputToken,
+        outputTokenSymbol: outputToken,
+        inputAmountUi: String(amount),
+        owner: this.wallet.publicKey!.toBase58(),
+        slippageBps: this.config.defaultSlippageBps,
+      });
+
+      if (buildResult.err) {
+        return { success: false, error: err(`  Swap build failed: ${buildResult.err}`) };
+      }
+      if (!buildResult.transactionBase64) {
+        return { success: false, error: err('  API returned no transaction — cannot execute') };
+      }
+
+      txBase64 = buildResult.transactionBase64;
+    } catch (e) {
+      return { success: false, error: err(`  Swap build failed: ${e instanceof Error ? e.message : String(e)}`) };
+    }
+
+    // Record pre-swap balance for post-verification
+    const preBalance = await this.state.getBalance(outputToken);
+
+    // Execute through the SAME pipeline as perps
+    const tradeKey = `swap:${inputToken}:${outputToken}:${amount}`;
+    const rebuildFn = async (): Promise<string | null> => {
+      try {
+        const rebuild = await this.api.buildSwap({
+          inputTokenSymbol: inputToken,
+          outputTokenSymbol: outputToken,
+          inputAmountUi: String(amount),
+          owner: this.wallet.publicKey!.toBase58(),
+          slippageBps: this.config.defaultSlippageBps,
+        });
+        return rebuild.transactionBase64 ?? null;
+      } catch {
+        return null;
+      }
+    };
+
+    log.info('ENGINE', 'Executing swap through transaction pipeline...');
+    const txResult = await this.txPipeline.execute(txBase64, this.wallet.keypair, tradeKey, rebuildFn);
+
+    if (!txResult.success) {
+      lines.push('', `  ${err('Swap execution failed:')} ${txResult.error}`, '');
+      return { success: false, error: lines.join('\n'), signature: txResult.signature };
+    }
+
+    // ─── STEP 7: Post-execution verification ──────────────────────────
+    const verifier = new PostVerifier(this.state);
+    const verification = await verifier.verifyBalanceChange(outputToken, preBalance, 'increase');
+
+    lines.push('');
+    lines.push(`  ${chalk.green('✓')} Swap executed: ${txResult.signature?.slice(0, 16)}...`);
+
+    if (verification.verified) {
+      lines.push(`  ${dim(verification.details)}`);
+    } else {
+      lines.push(`  ${chalk.yellow('⚠')} ${verification.details}`);
+      for (const w of verification.warnings) {
+        lines.push(`  ${dim(w)}`);
+      }
+    }
+    lines.push('');
+
+    log.success('ENGINE', `Swap complete: ${txResult.signature?.slice(0, 16)}...`);
 
     return {
       success: true,
-      error: [
-        '',
-        `  ${accentBold('SWAP PREVIEW')}`,
-        `  ${dim('─'.repeat(48))}`,
-        '',
-        `  ${dim('Action:')}    ${chalk.bold('SWAP')}`,
-        `  ${dim('From:')}      ${chalk.white.bold(String(amount))} ${chalk.white.bold(inputToken)}`,
-        `  ${dim('To:')}        ${chalk.white.bold(outputToken)}`,
-        `  ${dim('Est. Fee:')}  ${chalk.yellow(formatUsd(estSwapFee))} ${dim('(~0.07%)')}`,
-        `  ${dim('─'.repeat(48))}`,
-        '',
-      ].join('\n'),
+      signature: txResult.signature,
+      fees: estFee,
+      error: lines.join('\n'),
     };
   }
 

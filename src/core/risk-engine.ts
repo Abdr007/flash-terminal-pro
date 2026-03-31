@@ -23,6 +23,7 @@
 import {
   RiskLevel,
   type TradeIntent,
+  type SwapIntent,
   type RiskAssessment,
   type RiskCheck,
   type IStateEngine,
@@ -278,8 +279,100 @@ export class RiskEngine {
       }
       return pass('market_hours', `Market ${intent.market} open`);
     } catch {
-      // If we can't check, allow but warn
       return warning('market_hours', 'Could not verify market hours');
     }
+  }
+
+  // ─── Swap Risk Evaluation ─────────────────────────────────────────────
+
+  /**
+   * Evaluate swap risk. Checks:
+   *   1. Valid token pair (pool exists)
+   *   2. Amount bounds (min $1, max from config)
+   *   3. Balance sufficiency (unless DEV_MODE)
+   *   4. Slippage sanity
+   *   5. Same-token check
+   */
+  async evaluateSwap(intent: SwapIntent): Promise<RiskAssessment> {
+    const log = getLogger();
+    const checks: RiskCheck[] = [];
+
+    if (this.config.devMode) {
+      log.warn('RISK', 'DEV_MODE: swap balance check bypassed');
+    }
+
+    // 1. Same-token check
+    if (intent.inputToken === intent.outputToken) {
+      checks.push(block('swap_pair', `Cannot swap ${intent.inputToken} to itself`));
+    } else {
+      checks.push(pass('swap_pair', `${intent.inputToken} → ${intent.outputToken}`));
+    }
+
+    // 2. Pool validation
+    if (!intent.pool) {
+      checks.push(block('swap_pool', `No pool found with both ${intent.inputToken} and ${intent.outputToken}`));
+    } else {
+      checks.push(pass('swap_pool', `Pool: ${intent.pool}`));
+    }
+
+    // 3. Amount bounds
+    if (!Number.isFinite(intent.amountIn) || intent.amountIn <= 0) {
+      checks.push(block('swap_amount', 'Swap amount must be positive'));
+    } else if (intent.amountIn < 0.001) {
+      checks.push(block('swap_amount', `Amount ${intent.amountIn} too small (min 0.001)`));
+    } else if (intent.amountIn > this.config.maxCollateralPerTrade) {
+      checks.push(block('swap_amount', `Amount $${intent.amountIn} exceeds max $${this.config.maxCollateralPerTrade}`));
+    } else {
+      checks.push(pass('swap_amount', `Amount: ${intent.amountIn} ${intent.inputToken}`));
+    }
+
+    // 4. Slippage sanity
+    if (intent.slippageBps > 500) {
+      checks.push(warning('swap_slippage', `Slippage ${intent.slippageBps} bps (${(intent.slippageBps / 100).toFixed(1)}%) — very high`));
+    } else if (intent.slippageBps > 200) {
+      checks.push(warning('swap_slippage', `Slippage ${intent.slippageBps} bps (${(intent.slippageBps / 100).toFixed(1)}%)`));
+    } else {
+      checks.push(pass('swap_slippage', `Slippage: ${intent.slippageBps} bps`));
+    }
+
+    // 5. Balance check (bypassed in dev mode)
+    if (this.config.devMode) {
+      checks.push(warning('swap_balance', 'DEV_MODE: balance check bypassed'));
+    } else {
+      try {
+        const balance = await this.state.getBalance(intent.inputToken);
+        if (balance < intent.amountIn) {
+          checks.push(block('swap_balance', `Insufficient ${intent.inputToken}: have ${balance.toFixed(4)}, need ${intent.amountIn}`));
+        } else {
+          checks.push(pass('swap_balance', `${intent.inputToken} balance sufficient`));
+        }
+      } catch {
+        checks.push(warning('swap_balance', 'Could not verify balance'));
+      }
+    }
+
+    // Aggregate
+    const blocked = checks.filter(c => c.status === RiskLevel.Blocked);
+    const warned = checks.filter(c => c.status === RiskLevel.Warning);
+
+    const level = blocked.length > 0 ? RiskLevel.Blocked
+      : warned.length > 0 ? RiskLevel.Warning
+      : RiskLevel.Safe;
+
+    const summary = blocked.length > 0
+      ? blocked.map(c => c.message).join('; ')
+      : warned.length > 0
+        ? warned.map(c => c.message).join('; ')
+        : 'All swap checks passed';
+
+    log.debug('RISK', `Swap evaluation: ${level} — ${summary}`);
+
+    return {
+      allowed: blocked.length === 0,
+      mustConfirm: warned.length > 0,
+      level,
+      checks,
+      summary,
+    };
   }
 }

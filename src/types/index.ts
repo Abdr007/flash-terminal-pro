@@ -171,6 +171,33 @@ export interface TradeIntent {
   pool: string;             // resolved pool name
 }
 
+// ─── Swap Intent (validated, ready for risk check) ──────────────────────────
+
+export interface SwapIntent {
+  action: Action.Swap;
+  inputToken: string;
+  outputToken: string;
+  amountIn: number;            // UI amount of input token
+  minAmountOut?: number;       // minimum acceptable output (slippage protection)
+  slippageBps: number;         // slippage tolerance in basis points
+  pool: string;                // resolved pool name
+  estimatedOutput?: number;    // from API quote
+  estimatedFee?: number;       // from API quote
+}
+
+// ─── Swap API Quote ─────────────────────────────────────────────────────────
+
+export interface SwapApiQuote {
+  transactionBase64: string;
+  outputAmount: string;
+  outputAmountUi: string;
+  youPayUsdUi: string;
+  youReceiveUsdUi: string;
+  entryFee: number;
+  entryFeeBeforeDiscount: number;
+  err: string | null;
+}
+
 // ─── Risk Assessment ────────────────────────────────────────────────────────
 
 export interface RiskCheck {
