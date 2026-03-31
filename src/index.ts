@@ -18,6 +18,7 @@ import { CommandRouter } from './cli/router.js';
 import { Repl } from './cli/repl.js';
 import { FlashApiClient } from './services/api-client.js';
 import { FlashSdkClient } from './services/sdk-client.js';
+import { RpcManager } from './services/rpc-manager.js';
 import { WalletManager } from './wallet/manager.js';
 import { TxPipeline } from './tx/pipeline.js';
 import { getLogger } from './utils/logger.js';
@@ -31,6 +32,7 @@ async function main(): Promise<void> {
   // Initialize services
   const api = new FlashApiClient(config);
   const sdk = new FlashSdkClient(config);
+  const rpcManager = new RpcManager(config);
   const wallet = new WalletManager(config);
 
   // Try to load wallet if keypair path is configured
@@ -47,8 +49,11 @@ async function main(): Promise<void> {
   state.setApiClient(api);
   state.setWallet(wallet);
 
-  // Initialize tx pipeline
-  const txPipeline = new TxPipeline(wallet.connection, config);
+  // Initialize tx pipeline with RPC manager's connection
+  const txPipeline = new TxPipeline(rpcManager.connection, config);
+
+  // Start RPC health monitoring
+  rpcManager.startHealthMonitor();
 
   // Initialize execution engine
   const execution = new ExecutionEngine(config, state, api, sdk, wallet, txPipeline);
@@ -60,16 +65,23 @@ async function main(): Promise<void> {
     const input = args.join(' ');
     const output = await router.route(input);
     if (output) console.log(output);
+    rpcManager.stopHealthMonitor();
     process.exit(0);
   }
 
   // Interactive REPL
   const repl = new Repl(router, config);
 
-  process.on('SIGINT', () => repl.stop());
-  process.on('SIGTERM', () => repl.stop());
+  const cleanup = () => {
+    rpcManager.stopHealthMonitor();
+    repl.stop();
+  };
+
+  process.on('SIGINT', cleanup);
+  process.on('SIGTERM', cleanup);
   process.on('uncaughtException', (e) => {
     log.error('FATAL', e.message);
+    rpcManager.stopHealthMonitor();
     process.exit(1);
   });
 

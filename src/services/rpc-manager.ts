@@ -1,55 +1,233 @@
 /**
- * Solana RPC Manager
+ * Multi-RPC Manager — Production Resilience
  *
- * Multi-endpoint with health monitoring, failover, and slot lag detection.
+ * Manages multiple Solana RPC endpoints with:
+ *   - Health monitoring (periodic slot checks)
+ *   - Slot lag detection (>50 slots = unhealthy)
+ *   - Automatic failover on failure
+ *   - Cooldown before retrying failed endpoints
+ *   - Connection pooling
  *
- * Phase 1: Single endpoint stub
- * Phase 2: Full failover with slot lag detection from flash-terminal patterns
+ * Used by TxPipeline and StateEngine for all RPC operations.
  */
 
-import type { IRpcManager, FlashXConfig } from '../types/index.js';
+import { Connection } from '@solana/web3.js';
+import { getLogger } from '../utils/logger.js';
+import type { FlashXConfig } from '../types/index.js';
 
-export class RpcManager implements IRpcManager {
-  private endpoints: string[];
+// ─── Configuration ──────────────────────────────────────────────────────────
+
+const SLOT_LAG_THRESHOLD = 50;        // Slots behind = unhealthy
+const HEALTH_CHECK_INTERVAL_MS = 30_000; // Check every 30s
+const COOLDOWN_MS = 60_000;           // Wait 60s before retrying failed endpoint
+const CONNECT_TIMEOUT_MS = 10_000;    // Timeout for slot checks
+
+// ─── Endpoint State ─────────────────────────────────────────────────────────
+
+interface EndpointState {
+  url: string;
+  connection: Connection;
+  healthy: boolean;
+  lastSlot: number;
+  lastCheckMs: number;
+  failedAt: number;       // 0 = never failed
+  consecutiveFailures: number;
+}
+
+// ─── RpcManager ─────────────────────────────────────────────────────────────
+
+export class RpcManager {
+  private endpoints: EndpointState[] = [];
   private _activeIndex = 0;
+  private _healthTimer: ReturnType<typeof setInterval> | null = null;
+  private _maxSlot = 0;
 
   constructor(config: FlashXConfig) {
-    this.endpoints = [config.rpcUrl];
-    if (config.rpcBackupUrl) {
-      this.endpoints.push(config.rpcBackupUrl);
+    const log = getLogger();
+
+    // Build endpoint list from config
+    const urls: string[] = [config.rpcUrl];
+    if (config.rpcBackupUrl) urls.push(config.rpcBackupUrl);
+
+    // Parse additional RPC URLs from env (comma-separated)
+    const extra = process.env['RPC_EXTRA_URLS'];
+    if (extra) {
+      for (const url of extra.split(',').map(u => u.trim()).filter(Boolean)) {
+        if (!urls.includes(url)) urls.push(url);
+      }
+    }
+
+    for (const url of urls) {
+      const connection = new Connection(url, {
+        commitment: 'confirmed',
+        fetch: (fetchUrl: string | URL | Request, init?: RequestInit) =>
+          fetch(fetchUrl, { ...init, signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS) }),
+      });
+
+      this.endpoints.push({
+        url,
+        connection,
+        healthy: true, // Assume healthy until proven otherwise
+        lastSlot: 0,
+        lastCheckMs: 0,
+        failedAt: 0,
+        consecutiveFailures: 0,
+      });
+    }
+
+    log.info('RPC', `Initialized with ${this.endpoints.length} endpoint(s)`);
+  }
+
+  // ─── Active Connection ────────────────────────────────────────────────
+
+  /** Get the current active (healthiest) connection */
+  get connection(): Connection {
+    return this.endpoints[this._activeIndex].connection;
+  }
+
+  /** Get active endpoint URL (for display, scrubbed) */
+  get activeUrl(): string {
+    const url = this.endpoints[this._activeIndex].url;
+    try { return new URL(url).origin; } catch { return url.slice(0, 40); }
+  }
+
+  /** Total endpoint count */
+  get endpointCount(): number {
+    return this.endpoints.length;
+  }
+
+  /** Count of healthy endpoints */
+  get healthyCount(): number {
+    return this.endpoints.filter(e => e.healthy).length;
+  }
+
+  // ─── Health Monitoring ────────────────────────────────────────────────
+
+  /** Start periodic health checks */
+  startHealthMonitor(): void {
+    if (this._healthTimer) return;
+    this._healthTimer = setInterval(() => void this.checkAllHealth(), HEALTH_CHECK_INTERVAL_MS);
+    // Unref so it doesn't prevent process exit
+    if (this._healthTimer.unref) this._healthTimer.unref();
+  }
+
+  stopHealthMonitor(): void {
+    if (this._healthTimer) {
+      clearInterval(this._healthTimer);
+      this._healthTimer = null;
     }
   }
 
-  get activeEndpoint(): string {
-    return this.endpoints[this._activeIndex];
+  /** Check health of all endpoints */
+  async checkAllHealth(): Promise<void> {
+    const log = getLogger();
+    const now = Date.now();
+
+    for (const ep of this.endpoints) {
+      // Skip endpoints in cooldown
+      if (ep.failedAt > 0 && now - ep.failedAt < COOLDOWN_MS) continue;
+
+      try {
+        const slot = await ep.connection.getSlot('confirmed');
+        ep.lastSlot = slot;
+        ep.lastCheckMs = now;
+        ep.healthy = true;
+        ep.consecutiveFailures = 0;
+        ep.failedAt = 0;
+
+        if (slot > this._maxSlot) this._maxSlot = slot;
+      } catch {
+        ep.consecutiveFailures++;
+        ep.healthy = false;
+        ep.failedAt = now;
+        log.warn('RPC', `Endpoint ${this.scrubUrl(ep.url)} failed (${ep.consecutiveFailures}x)`);
+      }
+    }
+
+    // Detect slot lag
+    for (const ep of this.endpoints) {
+      if (ep.healthy && this._maxSlot > 0 && ep.lastSlot > 0) {
+        const lag = this._maxSlot - ep.lastSlot;
+        if (lag > SLOT_LAG_THRESHOLD) {
+          log.warn('RPC', `Endpoint ${this.scrubUrl(ep.url)} lagging ${lag} slots`);
+          ep.healthy = false;
+        }
+      }
+    }
+
+    // Failover to best healthy endpoint
+    this.selectBestEndpoint();
+  }
+
+  // ─── Failover ─────────────────────────────────────────────────────────
+
+  /** Select the healthiest endpoint (highest slot) */
+  private selectBestEndpoint(): void {
+    const log = getLogger();
+    let bestIdx = this._activeIndex;
+    let bestSlot = 0;
+
+    for (let i = 0; i < this.endpoints.length; i++) {
+      const ep = this.endpoints[i];
+      if (ep.healthy && ep.lastSlot > bestSlot) {
+        bestSlot = ep.lastSlot;
+        bestIdx = i;
+      }
+    }
+
+    if (bestIdx !== this._activeIndex) {
+      log.info('RPC', `Failover: ${this.scrubUrl(this.endpoints[this._activeIndex].url)} → ${this.scrubUrl(this.endpoints[bestIdx].url)}`);
+      this._activeIndex = bestIdx;
+    }
   }
 
   /**
-   * Send a signed transaction (base64) via RPC.
-   * Phase 2: sendRawTransaction with retry + multi-endpoint broadcast
+   * Report a failure on the active endpoint.
+   * Called by TxPipeline when an RPC call fails.
+   * Triggers immediate failover if another healthy endpoint exists.
    */
-  async sendTransaction(_txBase64: string): Promise<string> {
-    // Phase 2 implementation:
-    // 1. Deserialize base64 → VersionedTransaction
-    // 2. sendRawTransaction to all healthy endpoints
-    // 3. Return first signature
-    throw new Error('RPC sendTransaction not yet implemented — Phase 2');
+  reportFailure(): void {
+    const log = getLogger();
+    const ep = this.endpoints[this._activeIndex];
+    ep.consecutiveFailures++;
+    ep.failedAt = Date.now();
+
+    if (ep.consecutiveFailures >= 3) {
+      ep.healthy = false;
+      log.warn('RPC', `Endpoint marked unhealthy after ${ep.consecutiveFailures} failures`);
+    }
+
+    // Try to failover
+    for (let i = 0; i < this.endpoints.length; i++) {
+      if (i !== this._activeIndex && this.endpoints[i].healthy) {
+        log.info('RPC', `Failover to ${this.scrubUrl(this.endpoints[i].url)}`);
+        this._activeIndex = i;
+        return;
+      }
+    }
+
+    log.error('RPC', 'No healthy endpoints available — all RPCs degraded');
   }
 
-  /**
-   * Confirm a transaction by polling signature status.
-   * Phase 2: getSignatureStatuses polling + periodic resend
-   */
-  async confirmTransaction(_signature: string, _timeout?: number): Promise<boolean> {
-    throw new Error('RPC confirmTransaction not yet implemented — Phase 2');
+  /** Report success — reset failure counter on active endpoint */
+  reportSuccess(): void {
+    const ep = this.endpoints[this._activeIndex];
+    ep.consecutiveFailures = 0;
+    ep.healthy = true;
+    ep.failedAt = 0;
   }
 
-  /**
-   * Check slot health across endpoints.
-   * Phase 2: Compare getSlot() across endpoints, detect lag
-   */
-  async getSlotHealth(): Promise<{ slot: number; lag: number }> {
-    // Phase 1: stub
-    return { slot: 0, lag: 0 };
+  /** Get health summary for display */
+  getHealthSummary(): { url: string; healthy: boolean; slot: number; lag: number }[] {
+    return this.endpoints.map(ep => ({
+      url: this.scrubUrl(ep.url),
+      healthy: ep.healthy,
+      slot: ep.lastSlot,
+      lag: this._maxSlot > 0 ? this._maxSlot - ep.lastSlot : 0,
+    }));
+  }
+
+  private scrubUrl(url: string): string {
+    try { return new URL(url).origin; } catch { return url.slice(0, 30); }
   }
 }

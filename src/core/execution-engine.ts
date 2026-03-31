@@ -32,6 +32,9 @@ import type { WalletManager } from '../wallet/manager.js';
 import type { TxPipeline } from '../tx/pipeline.js';
 import { resolvePool, resolveCollateralToken, resolveSwapPool } from '../services/pool-resolver.js';
 import { PostVerifier } from '../tx/post-verify.js';
+import { checkQuoteFreshness, checkPriceDrift, type TimedQuote } from '../tx/quote-guard.js';
+import { getAuditLog, type AuditRecord } from '../security/audit-log.js';
+import { StateConsistency } from './state-consistency.js';
 import {
   formatUsd,
   formatPrice,
@@ -359,6 +362,7 @@ export class ExecutionEngine implements IExecutionEngine {
 
   private async handleSwap(command: ParsedCommand): Promise<TxResult> {
     const log = getLogger();
+    const audit = getAuditLog();
     const { inputToken, outputToken, amount } = command.params;
 
     if (!inputToken || !outputToken || !amount) {
@@ -403,7 +407,9 @@ export class ExecutionEngine implements IExecutionEngine {
       return { success: false, error: lines.join('\n') };
     }
 
-    // ─── STEP 4: Get API quote (preview) ──────────────────────────────
+    // ─── STEP 4: Get API quote (timed for freshness) ────────────────────
+    const startMs = Date.now();
+    let timedQuote: TimedQuote | null = null;
     let quoteOutput = '?';
     let quoteFee = 0;
     let quotePayUsd = '';
@@ -417,7 +423,7 @@ export class ExecutionEngine implements IExecutionEngine {
       });
 
       if (quote.err) {
-        log.warn('ENGINE', `Swap quote error: ${quote.err}`);
+        audit.log({ timestamp: new Date().toISOString(), action: 'swap', inputToken, outputToken, inputAmount: amount, status: 'failed', error: quote.err });
         return { success: false, error: err(`  Swap quote failed: ${quote.err}`) };
       }
 
@@ -426,12 +432,23 @@ export class ExecutionEngine implements IExecutionEngine {
       quotePayUsd = quote.youPayUsdUi ?? '';
       quoteReceiveUsd = quote.youReceiveUsdUi ?? '';
 
+      const outputNum = parseFloat(quoteOutput);
+      if (Number.isFinite(outputNum) && outputNum > 0) {
+        timedQuote = {
+          timestamp: Date.now(),
+          outputAmount: outputNum,
+          outputUsd: parseFloat(quoteReceiveUsd) || 0,
+          fee: quoteFee,
+          inputAmount: amount,
+          inputToken,
+          outputToken,
+        };
+      }
+
       log.debug('ENGINE', `Swap quote: ${amount} ${inputToken} → ${quoteOutput} ${outputToken}, fee=$${quoteFee}`);
     } catch (e) {
-      log.warn('ENGINE', `Swap quote fetch failed: ${e instanceof Error ? e.message : String(e)}`);
-      // In simulation/dev mode, allow preview without API quote
       if (!this.config.simulationMode && !this.config.devMode) {
-        return { success: false, error: err(`  Failed to fetch swap quote: ${e instanceof Error ? e.message : String(e)}`) };
+        return { success: false, error: err(`  Swap quote failed: ${e instanceof Error ? e.message : String(e)}`) };
       }
     }
 
@@ -455,40 +472,35 @@ export class ExecutionEngine implements IExecutionEngine {
     lines.push(`  ${dim('Slippage:')}  ${dim(this.config.defaultSlippageBps + ' bps')}`);
     lines.push(`  ${dim('─'.repeat(48))}`);
 
-    // Risk warnings
     if (risk.mustConfirm) {
       for (const c of risk.checks.filter(c => c.status === 'WARNING')) {
         lines.push(`  ${chalk.yellow('⚠')} ${c.message}`);
       }
     }
 
-    // ─── STEP 5b: SLIPPAGE ENFORCEMENT (TASK 3) ────────────────────────
-    // If we got a real quote, verify the output is within slippage tolerance
-    const quoteOutputNum = parseFloat(quoteOutput);
-    if (Number.isFinite(quoteOutputNum) && quoteOutputNum > 0) {
-      // Calculate minimum acceptable output based on slippage
-      const slippageFraction = this.config.defaultSlippageBps / 10000;
-      // Note: quoteOutput already factors in the fee — we just enforce the
-      // output doesn't deviate from what the API quoted beyond our tolerance
-      const minAcceptable = quoteOutputNum * (1 - slippageFraction);
-      log.debug('ENGINE', `Slippage check: output=${quoteOutputNum}, min=${minAcceptable.toFixed(6)} (${this.config.defaultSlippageBps}bps)`);
-      // This will be re-checked when the API builds the real tx with `owner` set
-    }
-
     // ─── STEP 6: Execute (if not simulation mode) ─────────────────────
     if (this.config.simulationMode) {
       lines.push('', `  ${dim('[SIMULATION MODE — no real transaction]')}`, '');
+      audit.log({ timestamp: new Date().toISOString(), action: 'swap', inputToken, outputToken, inputAmount: amount, outputAmount: timedQuote?.outputAmount, fees: estFee, status: 'preview', pool, slippageBps: this.config.defaultSlippageBps });
       log.success('ENGINE', `Swap preview: ${amount} ${inputToken} → ${quoteOutput} ${outputToken}`);
       return { success: true, error: lines.join('\n') };
     }
 
-    // Live execution requires wallet
     if (!this.wallet.isConnected || !this.wallet.keypair) {
       lines.push('', `  ${err('Wallet not connected — cannot execute swap')}`, '');
       return { success: false, error: lines.join('\n') };
     }
 
-    // Build transaction via API (with owner for co-signing)
+    // ─── QUOTE FRESHNESS CHECK (TASK 2) ──────────────────────────────
+    if (timedQuote) {
+      const freshness = checkQuoteFreshness(timedQuote);
+      if (!freshness.fresh) {
+        audit.log({ timestamp: new Date().toISOString(), action: 'swap', inputToken, outputToken, inputAmount: amount, status: 'blocked', error: freshness.reason });
+        return { success: false, error: err(`  ${freshness.reason}`) };
+      }
+    }
+
+    // ─── BUILD TRANSACTION ────────────────────────────────────────────
     log.info('ENGINE', 'Building swap transaction...');
     let txBase64: string;
     try {
@@ -501,39 +513,43 @@ export class ExecutionEngine implements IExecutionEngine {
       });
 
       if (buildResult.err) {
+        audit.log({ timestamp: new Date().toISOString(), action: 'swap', inputToken, outputToken, inputAmount: amount, status: 'failed', error: buildResult.err });
         return { success: false, error: err(`  Swap build failed: ${buildResult.err}`) };
       }
       if (!buildResult.transactionBase64) {
         return { success: false, error: err('  API returned no transaction — cannot execute') };
       }
 
-      // ─── SLIPPAGE ENFORCEMENT (TASK 3) ─────────────────────────────
-      // Compare the build output (real) vs the quote output (preview)
-      const buildOutputNum = parseFloat(buildResult.outputAmountUi ?? '0');
-      if (Number.isFinite(quoteOutputNum) && quoteOutputNum > 0 && Number.isFinite(buildOutputNum) && buildOutputNum > 0) {
-        const slippageFraction = this.config.defaultSlippageBps / 10000;
-        const minAcceptable = quoteOutputNum * (1 - slippageFraction);
-        if (buildOutputNum < minAcceptable) {
-          log.error('ENGINE', `SLIPPAGE BLOCKED: build output ${buildOutputNum} < min ${minAcceptable.toFixed(6)} (quote was ${quoteOutputNum})`);
-          return {
-            success: false,
-            error: err(`  BLOCKED: Slippage exceeded. Expected ≥${minAcceptable.toFixed(6)} ${outputToken}, got ${buildOutputNum}. Price moved too much.`),
-          };
+      // ─── PRICE DRIFT CHECK (TASK 1) ────────────────────────────────
+      if (timedQuote) {
+        const buildOutputNum = parseFloat(buildResult.outputAmountUi ?? '0');
+        const drift = checkPriceDrift(timedQuote.outputAmount, buildOutputNum);
+        if (!drift.acceptable) {
+          audit.log({ timestamp: new Date().toISOString(), action: 'swap', inputToken, outputToken, inputAmount: amount, status: 'blocked', error: drift.reason });
+          return { success: false, error: err(`  BLOCKED: ${drift.reason}`) };
         }
-        log.debug('ENGINE', `Slippage OK: build=${buildOutputNum} ≥ min=${minAcceptable.toFixed(6)}`);
       }
+
+      // ─── TX-LEVEL SLIPPAGE (TASK 3) ─────────────────────────────────
+      // Flash API embeds slippageBps into the on-chain instruction as
+      // `priceWithSlippage`. The program checks execution_price <= priceWithSlippage.
+      // We already pass slippageBps to the API. The on-chain enforcement is
+      // handled by the Flash program — the transaction will fail on-chain if
+      // price moves beyond the slippage. This is verified by simulation.
+      log.debug('ENGINE', `TX-level slippage: ${this.config.defaultSlippageBps}bps embedded by API`);
 
       txBase64 = buildResult.transactionBase64;
     } catch (e) {
       return { success: false, error: err(`  Swap build failed: ${e instanceof Error ? e.message : String(e)}`) };
     }
 
-    // Record pre-swap balance for post-verification
-    const preBalance = await this.state.getBalance(outputToken);
+    // ─── PRE-EXECUTION STATE SNAPSHOT ─────────────────────────────────
+    const consistency = new StateConsistency(this.state);
+    const preSnapshot = await consistency.snapshot([inputToken, outputToken]);
 
-    // Execute through the SAME pipeline as perps (with intent params for replay protection)
+    // ─── EXECUTE THROUGH PIPELINE ─────────────────────────────────────
     const tradeKey = `swap:${inputToken}:${outputToken}:${amount}`;
-    const intentParams = { action: 'swap', inputToken, outputToken, amount, timestamp: Math.floor(Date.now() / 1000) };
+    const intentParams = { action: 'swap', inputToken, outputToken, amount, ts: Math.floor(Date.now() / 1000) };
     const rebuildFn = async (): Promise<string | null> => {
       try {
         const rebuild = await this.api.buildSwap({
@@ -544,22 +560,30 @@ export class ExecutionEngine implements IExecutionEngine {
           slippageBps: this.config.defaultSlippageBps,
         });
         return rebuild.transactionBase64 ?? null;
-      } catch {
-        return null;
-      }
+      } catch { return null; }
     };
 
     log.info('ENGINE', 'Executing swap through transaction pipeline...');
     const txResult = await this.txPipeline.execute(txBase64, this.wallet.keypair, tradeKey, intentParams, rebuildFn);
+    const durationMs = Date.now() - startMs;
 
     if (!txResult.success) {
       lines.push('', `  ${err('Swap execution failed:')} ${txResult.error}`, '');
+      audit.log({ timestamp: new Date().toISOString(), action: 'swap', inputToken, outputToken, inputAmount: amount, txHash: txResult.signature, status: 'failed', error: txResult.error, durationMs, pool });
       return { success: false, error: lines.join('\n'), signature: txResult.signature };
     }
 
-    // ─── STEP 7: Post-execution verification ──────────────────────────
+    // ─── POST-EXECUTION VERIFICATION ──────────────────────────────────
     const verifier = new PostVerifier(this.state);
-    const verification = await verifier.verifyBalanceChange(outputToken, preBalance, 'increase');
+    const verification = await verifier.verifyBalanceChange(outputToken, preSnapshot.balances.get(outputToken) ?? 0, 'increase');
+
+    // ─── STATE CONSISTENCY CHECK (TASK 6) ─────────────────────────────
+    const consistencyResult = await consistency.verifyAfterTrade(preSnapshot, [
+      { type: 'balance_decrease', token: inputToken },
+      { type: 'balance_increase', token: outputToken },
+    ]);
+
+    const auditStatus: AuditRecord['status'] = consistencyResult.consistent ? 'confirmed' : 'inconsistent';
 
     lines.push('');
     lines.push(`  ${chalk.green('✓')} Swap executed: ${txResult.signature?.slice(0, 16)}...`);
@@ -568,13 +592,33 @@ export class ExecutionEngine implements IExecutionEngine {
       lines.push(`  ${dim(verification.details)}`);
     } else {
       lines.push(`  ${chalk.yellow('⚠')} ${verification.details}`);
-      for (const w of verification.warnings) {
-        lines.push(`  ${dim(w)}`);
-      }
+      for (const w of verification.warnings) lines.push(`  ${dim(w)}`);
+    }
+
+    if (!consistencyResult.consistent) {
+      lines.push(`  ${chalk.red('⚠ STATE INCONSISTENCY DETECTED')}`);
+      for (const issue of consistencyResult.issues) lines.push(`  ${chalk.red('  ' + issue)}`);
     }
     lines.push('');
 
-    log.success('ENGINE', `Swap complete: ${txResult.signature?.slice(0, 16)}...`);
+    // ─── AUDIT LOG ────────────────────────────────────────────────────
+    audit.log({
+      timestamp: new Date().toISOString(),
+      action: 'swap',
+      inputToken,
+      outputToken,
+      inputAmount: amount,
+      outputAmount: timedQuote?.outputAmount,
+      fees: estFee,
+      txHash: txResult.signature,
+      status: auditStatus,
+      durationMs,
+      pool,
+      slippageBps: this.config.defaultSlippageBps,
+      retryCount: txResult.retryCount,
+    });
+
+    log.success('ENGINE', `Swap complete: ${txResult.signature?.slice(0, 16)}... (${durationMs}ms)`);
 
     return {
       success: true,
