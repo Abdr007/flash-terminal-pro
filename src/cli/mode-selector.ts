@@ -1,22 +1,26 @@
 /**
  * Startup Mode Selector
  *
- * On CLI launch, prompts the user to choose between:
- *   1. SIMULATION MODE (safe, default)
- *   2. LIVE MODE (real trading)
+ * On CLI launch:
+ *   1. Display banner
+ *   2. Detect/setup wallet
+ *   3. Prompt: Simulation or Live
+ *   4. Live requires: wallet + CONFIRM
  *
- * Live mode requires:
- *   - Wallet loaded and connected
- *   - DEV_MODE off
- *   - Explicit "CONFIRM" typed by user
- *
- * Returns the selected mode. Never defaults to live.
+ * Wallet flow (same pattern as flash-terminal):
+ *   - Check WalletStore for registered wallets
+ *   - Auto-detect ~/.config/solana/id.json if no wallets
+ *   - Offer import/create if nothing found
+ *   - Connect wallet before entering live mode
  */
 
 import { createInterface } from 'readline';
+import { existsSync } from 'fs';
 import chalk from 'chalk';
 import { accentBold, dim } from '../utils/format.js';
-import type { WalletManager } from '../wallet/manager.js';
+import { getLogger } from '../utils/logger.js';
+import { WalletManager } from '../wallet/manager.js';
+import { WalletStore } from '../wallet/store.js';
 import type { FlashXConfig } from '../types/index.js';
 
 export type SelectedMode = 'simulation' | 'live';
@@ -33,12 +37,13 @@ function ask(prompt: string): Promise<string> {
   });
 }
 
-// ─── Mode Selection ─────────────────────────────────────────────────────────
+// ─── Main Mode Selection ────────────────────────────────────────────────────
 
 export async function selectMode(
   config: FlashXConfig,
   wallet: WalletManager,
 ): Promise<SelectedMode> {
+  const log = getLogger();
 
   // ─── Banner ─────────────────────────────────────────────────────────
   console.log('');
@@ -46,17 +51,23 @@ export async function selectMode(
   console.log(`  ${dim('Protocol-grade CLI for Flash.trade')}`);
   console.log('');
   console.log(`  ${dim('Network:')} ${config.network}`);
-  if (wallet.isConnected) {
-    console.log(`  ${dim('Wallet:')}  ${chalk.green(wallet.shortAddress)}`);
+
+  // ─── Wallet Detection ───────────────────────────────────────────────
+  if (!wallet.isConnected) {
+    const connected = await detectAndConnectWallet(config, wallet);
+    if (connected) {
+      console.log(`  ${dim('Wallet:')}  ${chalk.green(wallet.shortAddress)}`);
+    } else {
+      console.log(`  ${dim('Wallet:')}  ${chalk.yellow('Not connected')}`);
+    }
   } else {
-    console.log(`  ${dim('Wallet:')}  ${chalk.yellow('Not connected')}`);
+    console.log(`  ${dim('Wallet:')}  ${chalk.green(wallet.shortAddress)}`);
   }
   console.log('');
 
-  // ─── ENV Override: if SIMULATION_MODE is explicitly set, skip prompt ─
+  // ─── ENV override ───────────────────────────────────────────────────
   const envSim = process.env['SIMULATION_MODE']?.toLowerCase();
   if (envSim === 'false' || envSim === '0') {
-    // Env says live — still validate
     const validation = validateLiveMode(config, wallet);
     if (!validation.valid) {
       console.log(`  ${chalk.red('Cannot enter LIVE mode:')} ${validation.reason}`);
@@ -64,14 +75,11 @@ export async function selectMode(
       console.log('');
       return 'simulation';
     }
-    // Env override — require CONFIRM
     console.log(`  ${chalk.yellow('⚠  SIMULATION_MODE=false detected')}`);
     console.log(`  ${chalk.red.bold('WARNING: You are entering LIVE MODE')}`);
     console.log(`  ${chalk.red('Real transactions will be signed and sent on-chain.')}`);
-    console.log(`  ${chalk.red('Funds are at risk. This is irreversible.')}`);
     console.log('');
-
-    const confirm = await ask(`  ${chalk.yellow('Type CONFIRM to proceed, or press Enter for simulation:')} `);
+    const confirm = await ask(`  ${chalk.yellow('Type CONFIRM to proceed, or Enter for simulation:')} `);
     if (confirm === 'CONFIRM') {
       console.log(`  ${chalk.green.bold('LIVE MODE ACTIVATED')}`);
       console.log('');
@@ -86,12 +94,16 @@ export async function selectMode(
   console.log(`  ${chalk.cyan('Select Mode:')}`);
   console.log('');
   console.log(`    ${chalk.green('1')}  ${chalk.green('Simulation')} ${dim('— safe, no real trades (default)')}`);
-  console.log(`    ${chalk.red('2')}  ${chalk.red('Live')}       ${dim('— real trades, requires wallet')}`);
+
+  if (wallet.isConnected) {
+    console.log(`    ${chalk.red('2')}  ${chalk.red('Live')}       ${dim(`— real trades (${wallet.shortAddress})`)}`);
+  } else {
+    console.log(`    ${chalk.dim('2')}  ${chalk.dim('Live')}       ${dim('— requires wallet')}`);
+  }
   console.log('');
 
   const choice = await ask(`  ${dim('Enter choice [1]:')} `);
 
-  // ─── SIMULATION (default) ───────────────────────────────────────────
   if (choice !== '2') {
     console.log('');
     console.log(`  ${chalk.green.bold('SIMULATION MODE')}`);
@@ -100,9 +112,20 @@ export async function selectMode(
     return 'simulation';
   }
 
-  // ─── LIVE MODE VALIDATION ───────────────────────────────────────────
-  const validation = validateLiveMode(config, wallet);
+  // ─── Live Mode: wallet setup if needed ──────────────────────────────
+  if (!wallet.isConnected) {
+    console.log('');
+    console.log(`  ${chalk.yellow('Wallet required for live mode.')}`);
+    const connected = await interactiveWalletSetup(config, wallet);
+    if (!connected) {
+      console.log(`  ${dim('No wallet connected. Staying in SIMULATION mode.')}`);
+      console.log('');
+      return 'simulation';
+    }
+  }
 
+  // ─── Live Mode Validation ───────────────────────────────────────────
+  const validation = validateLiveMode(config, wallet);
   if (!validation.valid) {
     console.log('');
     console.log(`  ${chalk.red('Cannot enter LIVE mode:')}`);
@@ -112,7 +135,7 @@ export async function selectMode(
     return 'simulation';
   }
 
-  // ─── LIVE MODE CONFIRMATION ─────────────────────────────────────────
+  // ─── Live Mode Confirmation ─────────────────────────────────────────
   console.log('');
   console.log(`  ${chalk.red('─'.repeat(52))}`);
   console.log(`  ${chalk.red.bold('⚠  WARNING: You are entering LIVE MODE')}`);
@@ -138,10 +161,159 @@ export async function selectMode(
   console.log(`  ${dim('All safety checks remain active. Trade carefully.')}`);
   console.log('');
 
+  log.info('MODE', `Live mode activated — wallet: ${wallet.shortAddress}`);
   return 'live';
 }
 
-// ─── Live Mode Validation ───────────────────────────────────────────────────
+// ─── Wallet Auto-Detection ──────────────────────────────────────────────────
+
+async function detectAndConnectWallet(
+  config: FlashXConfig,
+  wallet: WalletManager,
+): Promise<boolean> {
+  const log = getLogger();
+  const store = new WalletStore();
+
+  // 1. Check if KEYPAIR_PATH is set in config
+  if (config.keypairPath) {
+    try {
+      wallet.loadFromFile(config.keypairPath);
+      log.info('WALLET', `Loaded from KEYPAIR_PATH: ${wallet.shortAddress}`);
+      return true;
+    } catch (e) {
+      log.warn('WALLET', `KEYPAIR_PATH failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // 2. Check WalletStore for registered wallets
+  const walletNames = store.list();
+  const defaultName = store.getDefault();
+
+  if (defaultName) {
+    try {
+      const entry = store.get(defaultName);
+      if (entry) {
+        wallet.loadFromFile(entry.path);
+        log.info('WALLET', `Loaded default wallet "${defaultName}": ${wallet.shortAddress}`);
+        return true;
+      }
+    } catch (e) {
+      log.warn('WALLET', `Default wallet "${defaultName}" failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  if (walletNames.length === 1) {
+    try {
+      const entry = store.get(walletNames[0]);
+      if (entry) {
+        wallet.loadFromFile(entry.path);
+        store.setDefault(walletNames[0]);
+        log.info('WALLET', `Auto-connected only wallet "${walletNames[0]}": ${wallet.shortAddress}`);
+        return true;
+      }
+    } catch {
+      // Fall through
+    }
+  }
+
+  // 3. Auto-detect system keypair (~/.config/solana/id.json)
+  const detected = store.autoDetect();
+  if (detected) {
+    try {
+      wallet.loadFromFile(detected.path);
+      // Register it for future use
+      try {
+        store.register(detected.name, detected.path);
+        store.setDefault(detected.name);
+      } catch {
+        // May already be registered
+      }
+      log.info('WALLET', `Auto-detected system keypair: ${wallet.shortAddress}`);
+      return true;
+    } catch (e) {
+      log.debug('WALLET', `Auto-detect failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  return false;
+}
+
+// ─── Interactive Wallet Setup ───────────────────────────────────────────────
+
+async function interactiveWalletSetup(
+  config: FlashXConfig,
+  wallet: WalletManager,
+): Promise<boolean> {
+  const store = new WalletStore();
+  const walletNames = store.list();
+
+  if (walletNames.length > 0) {
+    // Show existing wallets
+    console.log('');
+    console.log(`  ${chalk.cyan('Available wallets:')}`);
+    for (let i = 0; i < walletNames.length; i++) {
+      const entry = store.get(walletNames[i]);
+      const addr = entry ? `${entry.address.slice(0, 4)}...${entry.address.slice(-4)}` : '';
+      console.log(`    ${chalk.cyan(String(i + 1))}  ${walletNames[i]} ${dim(addr)}`);
+    }
+    console.log(`    ${chalk.cyan(String(walletNames.length + 1))}  ${dim('Import new wallet')}`);
+    console.log('');
+
+    const choice = await ask(`  ${dim('Select wallet:')} `);
+    const idx = parseInt(choice, 10) - 1;
+
+    if (idx >= 0 && idx < walletNames.length) {
+      try {
+        const entry = store.get(walletNames[idx]);
+        if (entry) {
+          wallet.loadFromFile(entry.path);
+          console.log(`  ${chalk.green('✓')} Connected: ${walletNames[idx]} (${wallet.shortAddress})`);
+          return true;
+        }
+      } catch (e) {
+        console.log(`  ${chalk.red('✗')} Failed: ${e instanceof Error ? e.message : String(e)}`);
+        return false;
+      }
+    }
+  }
+
+  // Import flow
+  console.log('');
+  console.log(`  ${dim('Enter path to keypair JSON file:')}`);
+  console.log(`  ${dim('(e.g., ~/.config/solana/id.json)')}`);
+  console.log('');
+
+  const path = await ask(`  ${dim('Path:')} `);
+  if (!path) return false;
+
+  // Resolve ~ to home
+  const resolved = path.startsWith('~')
+    ? path.replace('~', process.env['HOME'] ?? '')
+    : path;
+
+  if (!existsSync(resolved)) {
+    console.log(`  ${chalk.red('✗')} File not found: ${resolved}`);
+    return false;
+  }
+
+  const name = await ask(`  ${dim('Wallet name (e.g., "main"):')} `);
+  if (!name) return false;
+
+  try {
+    store.register(name, resolved);
+    store.setDefault(name);
+    wallet.loadFromFile(resolved);
+    console.log(`  ${chalk.green('✓')} Wallet "${name}" registered and connected (${wallet.shortAddress})`);
+    // Update config so the keypair path persists for this session
+    void config;
+    return true;
+  } catch (e) {
+    console.log(`  ${chalk.red('✗')} ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+}
+
+// ─── Validation ─────────────────────────────────────────────────────────────
 
 interface ValidationResult {
   valid: boolean;
@@ -149,21 +321,11 @@ interface ValidationResult {
 }
 
 function validateLiveMode(config: FlashXConfig, wallet: WalletManager): ValidationResult {
-  // Check 1: Wallet must be loaded
   if (!wallet.isConnected) {
-    return {
-      valid: false,
-      reason: 'No wallet connected. Set KEYPAIR_PATH in your .env file.',
-    };
+    return { valid: false, reason: 'No wallet connected.' };
   }
-
-  // Check 2: DEV_MODE must be off
   if (config.devMode) {
-    return {
-      valid: false,
-      reason: 'DEV_MODE is active. Disable DEV_MODE before entering live mode.',
-    };
+    return { valid: false, reason: 'DEV_MODE is active. Disable before live trading.' };
   }
-
   return { valid: true };
 }
