@@ -31,7 +31,7 @@ import { crossValidateQuotes } from '../services/sdk-client.js';
 import type { WalletManager } from '../wallet/manager.js';
 import type { TxPipeline } from '../tx/pipeline.js';
 import type { RpcManager } from '../services/rpc-manager.js';
-import { resolvePool, resolveCollateralToken, resolveSwapPool } from '../services/pool-resolver.js';
+import { resolvePool, resolveSwapPool } from '../services/pool-resolver.js';
 import { PostVerifier } from '../tx/post-verify.js';
 import { checkQuoteFreshness, checkPriceDrift, type TimedQuote } from '../tx/quote-guard.js';
 import { getAuditLog, type AuditRecord } from '../security/audit-log.js';
@@ -229,9 +229,13 @@ export class ExecutionEngine implements IExecutionEngine {
     metrics.recordTradeAttempt();
     log.info('ENGINE', `Open: ${market} ${side} ${leverage}x $${collateral}`);
 
-    // Resolve pool and collateral token from protocol rules
+    // Resolve pool
     const pool = resolvePool(market) ?? 'Crypto.1';
-    const resolvedCollToken = collateralToken ?? resolveCollateralToken(market, side);
+
+    // Flash API always accepts USDC as input — it auto-swaps to the
+    // correct collateral token (SOL for longs, USDC for shorts).
+    // The user pays in USDC regardless of side.
+    const paymentToken = collateralToken ?? 'USDC';
 
     // Build trade intent
     const intent: TradeIntent = {
@@ -240,7 +244,7 @@ export class ExecutionEngine implements IExecutionEngine {
       side,
       leverage,
       collateral,
-      collateralToken: resolvedCollToken,
+      collateralToken: paymentToken,
       sizeUsd: collateral * leverage,
       takeProfit,
       stopLoss,
@@ -335,11 +339,12 @@ export class ExecutionEngine implements IExecutionEngine {
     const startMs = Date.now();
     let txBase64: string;
     try {
-      const inputToken = intent.collateralToken;
-      const outputToken = intent.side === 'LONG' ? intent.market : 'USDC';
+      // Flash API always takes USDC as input, market token as output.
+      // tradeType determines direction (LONG/SHORT).
+      // inputAmountUi is the USD collateral amount.
       const buildResult = await this.api.buildOpenPosition({
-        inputTokenSymbol: inputToken,
-        outputTokenSymbol: outputToken,
+        inputTokenSymbol: 'USDC',
+        outputTokenSymbol: intent.market,
         inputAmountUi: String(collateral),
         leverage,
         tradeType: intent.side === 'LONG' ? 'LONG' : 'SHORT',
@@ -386,8 +391,8 @@ export class ExecutionEngine implements IExecutionEngine {
     const rebuildFn = async (): Promise<string | null> => {
       try {
         const rebuild = await this.api.buildOpenPosition({
-          inputTokenSymbol: intent.collateralToken,
-          outputTokenSymbol: intent.side === 'LONG' ? intent.market : 'USDC',
+          inputTokenSymbol: 'USDC',
+          outputTokenSymbol: intent.market,
           inputAmountUi: String(collateral),
           leverage,
           tradeType: intent.side === 'LONG' ? 'LONG' : 'SHORT',
