@@ -25,6 +25,8 @@ import { RiskEngine } from './risk-engine.js';
 import { StateEngine } from './state-engine.js';
 import { getLogger } from '../utils/logger.js';
 import type { FlashApiClient } from '../services/api-client.js';
+import type { FlashSdkClient } from '../services/sdk-client.js';
+import { crossValidateQuotes } from '../services/sdk-client.js';
 import type { WalletManager } from '../wallet/manager.js';
 import type { TxPipeline } from '../tx/pipeline.js';
 import { resolvePool, resolveCollateralToken } from '../services/pool-resolver.js';
@@ -67,19 +69,21 @@ export class ExecutionEngine implements IExecutionEngine {
   private risk: RiskEngine;
   private state: StateEngine;
   private api: FlashApiClient;
+  private sdk: FlashSdkClient;
   private wallet: WalletManager;
-  // txPipeline stored for Phase 2 execution — used when API returns transactionBase64
   txPipeline: TxPipeline;
 
   constructor(
     private config: FlashXConfig,
     state: StateEngine,
     api: FlashApiClient,
+    sdk: FlashSdkClient,
     wallet: WalletManager,
     txPipeline: TxPipeline,
   ) {
     this.state = state;
     this.api = api;
+    this.sdk = sdk;
     this.wallet = wallet;
     this.txPipeline = txPipeline;
     this.risk = new RiskEngine(config, state);
@@ -181,9 +185,18 @@ export class ExecutionEngine implements IExecutionEngine {
   }
 
   async preview(command: ParsedCommand): Promise<LocalQuote | null> {
-    // Phase 2: SDK-based local quote calculation
-    void command;
-    return null;
+    const { market, side, leverage, collateral } = command.params;
+    if (!market || !side || !leverage || !collateral) return null;
+    const pool = resolvePool(market) ?? 'Crypto.1';
+    return this.sdk.getOpenQuote({ market, side, leverage, collateral, pool });
+  }
+
+  /**
+   * Cross-validate an API quote against a local SDK quote.
+   * Returns divergences if any field is off by more than tolerance.
+   */
+  validateApiQuote(apiQuote: { entryFee: number; newLeverage: number }, sdkQuote: LocalQuote) {
+    return crossValidateQuotes(apiQuote, sdkQuote);
   }
 
   // ─── Trade Handlers ─────────────────────────────────────────────────────
@@ -234,8 +247,14 @@ export class ExecutionEngine implements IExecutionEngine {
       return { success: false, error: lines.join('\n') };
     }
 
-    // ─── PREVIEW SYSTEM ─────────────────────────────────────────────────
-    const estFee = estimateFee(market, intent.sizeUsd);
+    // ─── SDK LOCAL QUOTE ──────────────────────────────────────────────────
+    const sdkQuote = this.sdk.getOpenQuote({
+      market, side, leverage, collateral, pool,
+    });
+    log.debug('ENGINE', `SDK quote: fee=$${sdkQuote.openFee.toFixed(4)}, size=$${sdkQuote.sizeUsd.toFixed(0)}`);
+
+    // Use SDK fee if available, fallback to static estimate
+    const estFee = sdkQuote.openFee > 0 ? sdkQuote.openFee : estimateFee(market, intent.sizeUsd);
 
     const lines = [
       '',

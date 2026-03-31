@@ -17,6 +17,7 @@ import { ExecutionEngine } from './core/execution-engine.js';
 import { CommandRouter } from './cli/router.js';
 import { Repl } from './cli/repl.js';
 import { FlashApiClient } from './services/api-client.js';
+import { FlashSdkClient } from './services/sdk-client.js';
 import { WalletManager } from './wallet/manager.js';
 import { TxPipeline } from './tx/pipeline.js';
 import { getLogger } from './utils/logger.js';
@@ -29,6 +30,7 @@ async function main(): Promise<void> {
 
   // Initialize services
   const api = new FlashApiClient(config);
+  const sdk = new FlashSdkClient(config);
   const wallet = new WalletManager(config);
 
   // Try to load wallet if keypair path is configured
@@ -49,7 +51,7 @@ async function main(): Promise<void> {
   const txPipeline = new TxPipeline(wallet.connection, config);
 
   // Initialize execution engine
-  const execution = new ExecutionEngine(config, state, api, wallet, txPipeline);
+  const execution = new ExecutionEngine(config, state, api, sdk, wallet, txPipeline);
   const router = new CommandRouter(execution);
 
   // Single command mode
