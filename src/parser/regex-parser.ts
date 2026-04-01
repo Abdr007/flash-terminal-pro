@@ -382,6 +382,9 @@ const viewPatterns: PatternMatcher[] = [
     if (/^(?:balance|bal)$/i.test(input)) return cmd(Action.ViewBalance, flags, raw);
     if (/^(?:trades?|history|journal|trade\s*history)$/i.test(input)) return cmd(Action.ViewTrades, flags, raw);
     if (/^(?:stats|metrics|statistics)$/i.test(input)) return cmd(Action.ViewStats, flags, raw);
+    if (/^(?:earn|rewards?|staking)$/i.test(input)) return cmd(Action.ViewEarn, flags, raw);
+    if (/^(?:tokens?|holdings|assets)$/i.test(input)) return cmd(Action.ViewTokens, flags, raw);
+    if (/^(?:allocation|alloc)$/i.test(input)) return cmd(Action.ViewAllocation, flags, raw);
     return null;
   },
 
@@ -392,7 +395,9 @@ const viewPatterns: PatternMatcher[] = [
     const p = input.match(/^price\s+(\w+)/i);
     if (p) return cmd(Action.ViewPrices, { ...flags, symbol: normalizeAsset(p[1]) }, raw);
     const pl = input.match(/^pool\s+(\S+)/i);
-    if (pl) return cmd(Action.ViewPool, { ...flags, pool: pl[1] }, raw);
+    if (pl) return cmd(Action.ViewPoolDetail, { ...flags, pool: pl[1] }, raw);
+    const tk = input.match(/^token\s+(\w+)/i);
+    if (tk) return cmd(Action.ViewToken, { ...flags, symbol: normalizeAsset(tk[1]) }, raw);
     return null;
   },
 

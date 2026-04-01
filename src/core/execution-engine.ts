@@ -141,6 +141,15 @@ export class ExecutionEngine implements IExecutionEngine {
         return this.handleStats();
       case Action.ViewOrders:
         return this.handleViewOrders();
+      case Action.ViewEarn:
+      case Action.ViewPoolDetail:
+        return this.handleViewEarn(command);
+      case Action.ViewTokens:
+        return this.handleViewTokens();
+      case Action.ViewToken:
+        return this.handleViewToken(command);
+      case Action.ViewAllocation:
+        return this.handleViewAllocation();
       case Action.ViewFunding:
       case Action.ViewOI:
       case Action.ViewFees:
@@ -971,6 +980,237 @@ export class ExecutionEngine implements IExecutionEngine {
     }
   }
 
+  // ─── Earn / Pool Views ────────────────────────────────────────────────
+
+  private async handleViewEarn(command: ParsedCommand): Promise<TxResult> {
+    const poolName = command.params.pool;
+
+    try {
+      const poolData = await this.api.getPoolData() as Record<string, unknown>;
+      const pools = (poolData['pools'] ?? []) as Record<string, unknown>[];
+
+      if (poolName) {
+        // Pool detail
+        const pool = pools.find(p =>
+          String(p['poolName'] ?? '').toLowerCase() === poolName.toLowerCase() ||
+          String(p['poolName'] ?? '').toLowerCase().startsWith(poolName.toLowerCase())
+        );
+        if (!pool) return { success: false, error: err(`  Pool not found: ${poolName}`) };
+
+        const lp = pool['lpStats'] as Record<string, unknown> | undefined;
+        const custodies = (pool['custodyStats'] ?? []) as Record<string, unknown>[];
+
+        const lines = [
+          '',
+          `  ${accentBold(String(pool['poolName']))}`,
+          `  ${dim('─'.repeat(52))}`,
+          '',
+          `  ${dim('TVL:')}         ${chalk.white.bold(formatUsd(Number(lp?.['totalPoolValueUsd'] ?? 0)))}`,
+          `  ${dim('LP Price:')}    ${chalk.white('$' + String(lp?.['lpPrice'] ?? '—'))}`,
+          `  ${dim('LP Supply:')}   ${dim(String(lp?.['lpTokenSupply'] ?? '—'))}`,
+          `  ${dim('Stable %:')}    ${dim(String(lp?.['stableCoinPercentage'] ?? '—') + '%')}`,
+          `  ${dim('Max AUM:')}     ${dim(formatUsd(Number(lp?.['maxAumUsd'] ?? 0)))}`,
+          '',
+          `  ${dim('ASSETS')}`,
+        ];
+
+        for (const c of custodies) {
+          const sym = String(c['symbol'] ?? '');
+          const owned = String(c['assetsOwnedAmountUi'] ?? '0');
+          const usd = formatUsd(Number(c['totalUsdOwnedAmountUi'] ?? 0));
+          const ratio = String(c['currentRatioUi'] ?? '0');
+          const target = String(c['targetRatioUi'] ?? '0');
+          const util = String(c['utilizationUi'] ?? '0');
+          lines.push(`    ${pad(sym, 10)} ${pad(owned, 14)} ${pad(usd, 12)} ratio: ${ratio}% / ${target}%  util: ${util}%`);
+        }
+
+        lines.push(`  ${dim('─'.repeat(52))}`);
+        lines.push(`  ${dim('Earn execution: NOT SUPPORTED via API (use flash.trade)')}`, '');
+        return { success: true, error: lines.join('\n') };
+      }
+
+      // Overview of all pools
+      const lines = [
+        '',
+        `  ${accentBold('EARN — LIQUIDITY POOLS')}`,
+        `  ${dim('─'.repeat(56))}`,
+        '',
+        dim(`  ${pad('Pool', 16)} ${pad('TVL', 14)} ${pad('LP Price', 12)} ${pad('Stable %', 10)} ${pad('Assets', 6)}`),
+        dim('  ' + '─'.repeat(56)),
+      ];
+
+      for (const pool of pools) {
+        const name = String(pool['poolName'] ?? '');
+        const lp = pool['lpStats'] as Record<string, unknown> | undefined;
+        const tvl = formatUsd(Number(lp?.['totalPoolValueUsd'] ?? 0));
+        const price = '$' + String(lp?.['lpPrice'] ?? '—');
+        const stable = String(lp?.['stableCoinPercentage'] ?? '—') + '%';
+        const assets = String((pool['custodyStats'] as unknown[])?.length ?? 0);
+        lines.push(`  ${pad(name, 16)} ${pad(tvl, 14)} ${pad(price, 12)} ${pad(stable, 10)} ${pad(assets, 6)}`);
+      }
+
+      lines.push('');
+      lines.push(`  ${dim('Type "pool <name>" for details (e.g., pool Crypto.1)')}`);
+      lines.push(`  ${dim('Earn execution: NOT SUPPORTED via API (use flash.trade)')}`);
+      lines.push('');
+      return { success: true, error: lines.join('\n') };
+    } catch (e) {
+      return { success: false, error: err(`  Failed to fetch pool data: ${e instanceof Error ? e.message : String(e)}`) };
+    }
+  }
+
+  // ─── Token Views ─────────────────────────────────────────────────────
+
+  private async handleViewTokens(): Promise<TxResult> {
+    if (!this.wallet.isConnected) {
+      return { success: true, error: dim('  Wallet not connected') };
+    }
+
+    const lines = [
+      '',
+      `  ${accentBold('TOKEN HOLDINGS')}`,
+      `  ${dim('─'.repeat(52))}`,
+      '',
+    ];
+
+    try {
+      const solBal = await this.state.getBalance('SOL');
+      const usdcBal = await this.state.getBalance('USDC');
+      const solPrice = await this.state.getPrice('SOL');
+      const solUsd = solBal * solPrice;
+      const total = solUsd + usdcBal;
+
+      lines.push(dim(`  ${pad('Token', 8)} ${pad('Balance', 14)} ${pad('Price', 12)} ${pad('Value', 12)} ${pad('Alloc', 8)}`));
+      lines.push(dim('  ' + '─'.repeat(52)));
+
+      if (solBal > 0) {
+        const alloc = total > 0 ? ((solUsd / total) * 100).toFixed(1) + '%' : '—';
+        lines.push(`  ${pad('SOL', 8)} ${pad(solBal.toFixed(4), 14)} ${pad(formatPrice(solPrice), 12)} ${pad(formatUsd(solUsd), 12)} ${pad(alloc, 8)}`);
+      }
+      if (usdcBal > 0) {
+        const alloc = total > 0 ? ((usdcBal / total) * 100).toFixed(1) + '%' : '—';
+        lines.push(`  ${pad('USDC', 8)} ${pad(usdcBal.toFixed(2), 14)} ${pad('$1.00', 12)} ${pad(formatUsd(usdcBal), 12)} ${pad(alloc, 8)}`);
+      }
+
+      lines.push('');
+      lines.push(`  ${dim('Total:')} ${chalk.white.bold(formatUsd(total))}`);
+    } catch {
+      lines.push(`  ${dim('Could not fetch token data')}`);
+    }
+
+    lines.push(`  ${dim('─'.repeat(52))}`, '');
+    return { success: true, error: lines.join('\n') };
+  }
+
+  private async handleViewToken(command: ParsedCommand): Promise<TxResult> {
+    const symbol = command.params.symbol;
+    if (!symbol) return { success: false, error: err('  Usage: token SOL') };
+
+    try {
+      const price = await this.state.getPrice(symbol);
+      const market = await this.state.getMarket(symbol);
+      const position = await this.state.getPosition(symbol);
+
+      const lines = [
+        '',
+        `  ${accentBold(symbol)}`,
+        `  ${dim('─'.repeat(48))}`,
+        '',
+        `  ${dim('Price:')}       ${chalk.white.bold(formatPrice(price))}`,
+      ];
+
+      if (market) {
+        lines.push(`  ${dim('Pool:')}        ${dim(market.pool)}`);
+        lines.push(`  ${dim('Max Lev:')}     ${market.maxLeverage}x`);
+        lines.push(`  ${dim('Status:')}      ${market.isOpen ? ok('OPEN') : err('CLOSED')}`);
+      }
+
+      if (position) {
+        lines.push('');
+        lines.push(`  ${dim('POSITION')}`);
+        lines.push(`  ${dim('Side:')}        ${colorSide(position.side)}`);
+        lines.push(`  ${dim('Size:')}        ${formatUsd(position.sizeUsd)}`);
+        lines.push(`  ${dim('Entry:')}       ${formatPrice(position.entryPrice)}`);
+        lines.push(`  ${dim('PnL:')}         ${colorPnl(position.pnl)}`);
+        lines.push(`  ${dim('Leverage:')}    ${position.leverage}x`);
+      }
+
+      if (this.wallet.isConnected) {
+        const bal = await this.state.getBalance(symbol);
+        if (bal > 0) {
+          lines.push('');
+          lines.push(`  ${dim('WALLET')}`);
+          lines.push(`  ${dim('Balance:')}     ${bal.toFixed(4)} ${symbol}`);
+          lines.push(`  ${dim('Value:')}       ${formatUsd(bal * price)}`);
+        }
+      }
+
+      lines.push(`  ${dim('─'.repeat(48))}`, '');
+      return { success: true, error: lines.join('\n') };
+    } catch {
+      return { success: false, error: err(`  Could not fetch data for ${symbol}`) };
+    }
+  }
+
+  private async handleViewAllocation(): Promise<TxResult> {
+    if (!this.wallet.isConnected) {
+      return { success: true, error: dim('  Wallet not connected') };
+    }
+
+    const lines = [
+      '',
+      `  ${accentBold('PORTFOLIO ALLOCATION')}`,
+      `  ${dim('─'.repeat(48))}`,
+      '',
+    ];
+
+    try {
+      const solBal = await this.state.getBalance('SOL');
+      const usdcBal = await this.state.getBalance('USDC');
+      const solPrice = await this.state.getPrice('SOL');
+      const positions = await this.state.getPositions();
+
+      const solUsd = solBal * solPrice;
+      const positionValue = positions.reduce((s, p) => s + p.collateralUsd, 0);
+      const total = solUsd + usdcBal + positionValue;
+
+      if (total <= 0) {
+        lines.push(`  ${dim('No assets found')}`);
+      } else {
+        // Wallet
+        const walletPct = ((solUsd + usdcBal) / total * 100).toFixed(1);
+        const posPct = (positionValue / total * 100).toFixed(1);
+
+        lines.push(`  ${dim('WALLET')}  ${dim(`(${walletPct}%)`)}`);
+        if (solUsd > 0) {
+          const bar = '█'.repeat(Math.round(solUsd / total * 20));
+          lines.push(`    SOL   ${pad(formatUsd(solUsd), 12)} ${chalk.green(bar)}`);
+        }
+        if (usdcBal > 0) {
+          const bar = '█'.repeat(Math.round(usdcBal / total * 20));
+          lines.push(`    USDC  ${pad(formatUsd(usdcBal), 12)} ${chalk.blue(bar)}`);
+        }
+
+        if (positions.length > 0) {
+          lines.push('');
+          lines.push(`  ${dim('POSITIONS')}  ${dim(`(${posPct}%)`)}`);
+          for (const p of positions) {
+            const pctOfTotal = (p.collateralUsd / total * 100).toFixed(1);
+            lines.push(`    ${pad(p.market, 6)} ${colorSide(p.side)}  ${pad(formatUsd(p.collateralUsd), 10)} ${dim(pctOfTotal + '%')}  ${colorPnl(p.pnl)}`);
+          }
+        }
+
+        lines.push('');
+        lines.push(`  ${dim('TOTAL:')} ${chalk.white.bold(formatUsd(total))}`);
+      }
+    } catch {
+      lines.push(`  ${dim('Could not calculate allocation')}`);
+    }
+
+    lines.push(`  ${dim('─'.repeat(48))}`, '');
+    return { success: true, error: lines.join('\n') };
+  }
+
   // ─── Trade History ────────────────────────────────────────────────────
 
   private handleTradeHistory(): TxResult {
@@ -1141,6 +1381,15 @@ export class ExecutionEngine implements IExecutionEngine {
       `    balance / bal              Wallet balance`,
       `    trades / history           Trade history`,
       `    stats                      Execution metrics`,
+      '',
+      `  ${chalk.cyan('EARN')}`,
+      `    earn                       Pool overview (TVL, LP price)`,
+      `    pool Crypto.1              Pool detail (assets, ratios)`,
+      '',
+      `  ${chalk.cyan('PORTFOLIO')}`,
+      `    tokens                     Token holdings`,
+      `    token SOL                  Token detail + position`,
+      `    allocation                 Portfolio breakdown`,
       '',
       `  ${chalk.cyan('SYSTEM')}`,
       `    health                     System status`,
