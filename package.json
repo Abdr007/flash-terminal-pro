@@ -21,19 +21,14 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@coral-xyz/anchor": "0.32.1",
-    "@pythnetwork/client": "2.22.1",
     "@solana/spl-token": "0.4.14",
     "@solana/web3.js": "1.98.2",
-    "bn.js": "^5.2.1",
-    "bs58": "^5.0.0",
     "chalk": "^5.4.1",
     "dotenv": "^16.4.7",
-    "flash-sdk": "^15.9.0",
+    "tweetnacl": "^1.0.3",
     "zod": "^3.24.2"
   },
   "devDependencies": {
-    "@types/bn.js": "^5.2.0",
     "@types/node": "^22.13.0",
     "prettier": "^3.4.2",
     "tsx": "^4.19.0",

@@ -173,33 +173,6 @@ export interface TradeIntent {
   pool: string;             // resolved pool name
 }
 
-// ─── Swap Intent (validated, ready for risk check) ──────────────────────────
-
-export interface SwapIntent {
-  action: Action.Swap;
-  inputToken: string;
-  outputToken: string;
-  amountIn: number;            // UI amount of input token
-  minAmountOut?: number;       // minimum acceptable output (slippage protection)
-  slippageBps: number;         // slippage tolerance in basis points
-  pool: string;                // resolved pool name
-  estimatedOutput?: number;    // from API quote
-  estimatedFee?: number;       // from API quote
-}
-
-// ─── Swap API Quote ─────────────────────────────────────────────────────────
-
-export interface SwapApiQuote {
-  transactionBase64: string;
-  outputAmount: string;
-  outputAmountUi: string;
-  youPayUsdUi: string;
-  youReceiveUsdUi: string;
-  entryFee: number;
-  entryFeeBeforeDiscount: number;
-  err: string | null;
-}
-
 // ─── Risk Assessment ────────────────────────────────────────────────────────
 
 export interface RiskCheck {
@@ -218,20 +191,6 @@ export interface RiskAssessment {
   summary: string;
 }
 
-// ─── Quote (local SDK calculation) ──────────────────────────────────────────
-
-export interface LocalQuote {
-  entryPrice: number;
-  exitPrice?: number;
-  liquidationPrice: number;
-  openFee: number;
-  closeFee?: number;
-  priceImpact: number;
-  leverage: number;
-  sizeUsd: number;
-  collateralUsd: number;
-  fundingRatePerHour: number;
-}
 
 // ─── API Quote (from transaction builder) ───────────────────────────────────
 
@@ -357,7 +316,6 @@ export interface FlashXConfig {
 
 export interface IExecutionEngine {
   execute(command: ParsedCommand): Promise<TxResult>;
-  preview(command: ParsedCommand): Promise<LocalQuote | null>;
 }
 
 export interface IRiskEngine {
@@ -392,18 +350,6 @@ export interface IApiClient {
   buildAddCollateral(params: Record<string, unknown>): Promise<unknown>;
   buildRemoveCollateral(params: Record<string, unknown>): Promise<unknown>;
   buildReversePosition(params: Record<string, unknown>): Promise<unknown>;
-}
-
-export interface ISdkClient {
-  // Quotes (local, no network)
-  getOpenQuote(params: Record<string, unknown>): LocalQuote;
-  getCloseQuote(params: Record<string, unknown>): LocalQuote;
-  getLiquidationPrice(params: Record<string, unknown>): number;
-  getPnl(params: Record<string, unknown>): number;
-
-  // Account reads (via RPC)
-  fetchPosition(pubkey: string): Promise<unknown>;
-  fetchPositions(owner: string): Promise<unknown[]>;
 }
 
 export interface IRpcManager {

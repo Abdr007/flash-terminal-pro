@@ -8,7 +8,7 @@
  * Phase 2: Full implementation with retry, rate limiting, timeout
  */
 
-import type { IApiClient, ApiQuote, SwapApiQuote, FlashXConfig } from '../types/index.js';
+import type { IApiClient, ApiQuote, FlashXConfig } from '../types/index.js';
 import { scrubError } from '../utils/format.js';
 import { getLogger } from '../utils/logger.js';
 
@@ -169,47 +169,4 @@ export class FlashApiClient implements IApiClient {
     return this.post<unknown>('/transaction-builder/reverse-position', params);
   }
 
-  /**
-   * Build a swap transaction.
-   *
-   * Flash Trade uses the same /transaction-builder/open-position endpoint
-   * with tradeType: "SWAP" to execute spot swaps through the pool.
-   *
-   * The API co-signs and returns a base64 transaction.
-   */
-  async buildSwap(params: {
-    inputTokenSymbol: string;
-    outputTokenSymbol: string;
-    inputAmountUi: string;
-    owner?: string;
-    slippageBps?: number;
-  }): Promise<SwapApiQuote> {
-    return this.post<SwapApiQuote>('/transaction-builder/open-position', {
-      inputTokenSymbol: params.inputTokenSymbol,
-      outputTokenSymbol: params.outputTokenSymbol,
-      inputAmountUi: params.inputAmountUi,
-      leverage: 1,           // leverage=1 means spot swap
-      tradeType: 'SWAP',     // key differentiator from perps
-      owner: params.owner,
-      slippageBps: params.slippageBps ?? 80,
-    });
-  }
-
-  /**
-   * Get a swap preview (no owner = no transaction built, just quote).
-   */
-  async getSwapQuote(params: {
-    inputTokenSymbol: string;
-    outputTokenSymbol: string;
-    inputAmountUi: string;
-  }): Promise<SwapApiQuote> {
-    return this.post<SwapApiQuote>('/transaction-builder/open-position', {
-      inputTokenSymbol: params.inputTokenSymbol,
-      outputTokenSymbol: params.outputTokenSymbol,
-      inputAmountUi: params.inputAmountUi,
-      leverage: 1,
-      tradeType: 'SWAP',
-      // No owner = preview only, no transactionBase64
-    });
-  }
 }

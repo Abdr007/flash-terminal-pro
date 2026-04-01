@@ -16,10 +16,8 @@ import {
   Action,
   type ParsedCommand,
   type TradeIntent,
-  type SwapIntent,
   type Position,
   type TxResult,
-  type LocalQuote,
   type IExecutionEngine,
   type FlashXConfig,
 } from '../types/index.js';
@@ -27,15 +25,12 @@ import { RiskEngine } from './risk-engine.js';
 import { StateEngine } from './state-engine.js';
 import { getLogger } from '../utils/logger.js';
 import type { FlashApiClient } from '../services/api-client.js';
-import type { FlashSdkClient } from '../services/sdk-client.js';
-import { crossValidateQuotes } from '../services/sdk-client.js';
 import type { WalletManager } from '../wallet/manager.js';
 import type { TxPipeline } from '../tx/pipeline.js';
 import type { RpcManager } from '../services/rpc-manager.js';
-import { resolvePool, resolveSwapPool } from '../services/pool-resolver.js';
-import { PostVerifier } from '../tx/post-verify.js';
-import { checkQuoteFreshness, checkPriceDrift, type TimedQuote } from '../tx/quote-guard.js';
-import { getAuditLog, type AuditRecord } from '../security/audit-log.js';
+import { resolvePool } from '../services/pool-resolver.js';
+import { estimateOpenPosition, crossValidateWithEstimate } from '../services/quote-engine.js';
+import { getAuditLog } from '../security/audit-log.js';
 import { StateConsistency } from './state-consistency.js';
 import { getMetrics } from './metrics.js';
 import { ErrorCode } from '../types/errors.js';
@@ -53,32 +48,12 @@ import {
   pad,
 } from '../utils/format.js';
 
-// ─── Fee estimation constants (from Flash protocol docs) ────────────────────
-// These are the standard open/close fee rates per pool/asset
-const FEE_RATES: Record<string, number> = {
-  SOL: 0.00051,  BTC: 0.00051,  ETH: 0.00051,   // Crypto: 0.051%
-  ZEC: 0.002,    BNB: 0.001,                      // Crypto alt
-  EUR: 0.0003,   GBP: 0.0003,   USDJPY: 0.0003, USDCNH: 0.0003, // FX: 0.03%
-  XAU: 0.001,    XAG: 0.001,    CRUDEOIL: 0.0015, NATGAS: 0.0015, // Commodities
-  JUP: 0.0011,   JTO: 0.0011,   RAY: 0.0011, PYTH: 0.0011, // Governance: 0.11%
-  KMNO: 0.002,   MET: 0.002,    HYPE: 0.002,
-  BONK: 0.0012,  WIF: 0.0012,   PENGU: 0.0012, PUMP: 0.0012, FARTCOIN: 0.0012, // Meme
-  SPY: 0.001,    NVDA: 0.001,   TSLA: 0.001, AAPL: 0.001, AMD: 0.001, AMZN: 0.001, // Equity
-  ORE: 0.002,
-};
-
-function estimateFee(market: string, sizeUsd: number): number {
-  const rate = FEE_RATES[market] ?? 0.001; // default 0.1%
-  return sizeUsd * rate;
-}
-
 // ─── ExecutionEngine ────────────────────────────────────────────────────────
 
 export class ExecutionEngine implements IExecutionEngine {
   private risk: RiskEngine;
   private state: StateEngine;
   private api: FlashApiClient;
-  private sdk: FlashSdkClient;
   private wallet: WalletManager;
   txPipeline: TxPipeline;
   private rpcManager: RpcManager | null = null;
@@ -87,14 +62,12 @@ export class ExecutionEngine implements IExecutionEngine {
     private config: FlashXConfig,
     state: StateEngine,
     api: FlashApiClient,
-    sdk: FlashSdkClient,
     wallet: WalletManager,
     txPipeline: TxPipeline,
     rpcManager?: RpcManager,
   ) {
     this.state = state;
     this.api = api;
-    this.sdk = sdk;
     this.wallet = wallet;
     this.txPipeline = txPipeline;
     this.rpcManager = rpcManager ?? null;
@@ -137,9 +110,9 @@ export class ExecutionEngine implements IExecutionEngine {
       case Action.CancelAllOrders:
         return this.handleOrder(command);
 
-      // ─── Swap ───────────────────────────────────────────────────────
+      // ─── Swap (not supported via API) ──────────────────────────────
       case Action.Swap:
-        return this.handleSwap(command);
+        return { success: false, error: '  Swap not supported in API-only mode. Use flash.trade website.' };
 
       // ─── LP ─────────────────────────────────────────────────────────
       case Action.AddLiquidity:
@@ -200,20 +173,7 @@ export class ExecutionEngine implements IExecutionEngine {
     }
   }
 
-  async preview(command: ParsedCommand): Promise<LocalQuote | null> {
-    const { market, side, leverage, collateral } = command.params;
-    if (!market || !side || !leverage || !collateral) return null;
-    const pool = resolvePool(market) ?? 'Crypto.1';
-    return this.sdk.getOpenQuote({ market, side, leverage, collateral, pool });
-  }
-
-  /**
-   * Cross-validate an API quote against a local SDK quote.
-   * Returns divergences if any field is off by more than tolerance.
-   */
-  validateApiQuote(apiQuote: { entryFee: number; newLeverage: number }, sdkQuote: LocalQuote) {
-    return crossValidateQuotes(apiQuote, sdkQuote);
-  }
+  // Preview removed — SDK dependency eliminated. Use API quote directly.
 
   // ─── Trade Handlers ─────────────────────────────────────────────────────
 
@@ -276,14 +236,9 @@ export class ExecutionEngine implements IExecutionEngine {
       return { success: false, error: lines.join('\n') };
     }
 
-    // ─── SDK LOCAL QUOTE ──────────────────────────────────────────────────
-    const sdkQuote = this.sdk.getOpenQuote({
-      market, side, leverage, collateral, pool,
-    });
-    log.debug('ENGINE', `SDK quote: fee=$${sdkQuote.openFee.toFixed(4)}, size=$${sdkQuote.sizeUsd.toFixed(0)}`);
-
-    // Use SDK fee if available, fallback to static estimate
-    const estFee = sdkQuote.openFee > 0 ? sdkQuote.openFee : estimateFee(market, intent.sizeUsd);
+    // ─── LOCAL ESTIMATE (no SDK) ───────────────────────────────────────
+    const localEst = estimateOpenPosition(market, collateral, leverage);
+    const estFee = localEst.openFee;
 
     const lines = [
       '',
@@ -295,7 +250,7 @@ export class ExecutionEngine implements IExecutionEngine {
       `  ${dim('Leverage:')}    ${chalk.white.bold(leverage + 'x')}`,
       `  ${dim('Collateral:')}  ${chalk.white.bold(formatUsd(collateral))} ${dim(`(${intent.collateralToken})`)}`,
       `  ${dim('Size:')}        ${chalk.white.bold(formatUsd(intent.sizeUsd))}`,
-      `  ${dim('Est. Fee:')}    ${chalk.yellow(formatUsd(estFee))} ${dim(`(${((FEE_RATES[market] ?? 0.001) * 100).toFixed(3)}%)`)}`,
+      `  ${dim('Est. Fee:')}    ${chalk.yellow(formatUsd(estFee))} ${dim(`(${(localEst.feeRate * 100).toFixed(3)}%)`)}`,
     ];
 
     if (takeProfit) lines.push(`  ${dim('Take Profit:')} ${chalk.green(formatPrice(takeProfit))}`);
@@ -363,14 +318,10 @@ export class ExecutionEngine implements IExecutionEngine {
         return { success: false, error: err('  API returned no transaction') };
       }
 
-      // Cross-validate API quote vs SDK quote (when both have valid numbers)
+      // Cross-validate API quote vs local estimate (no SDK)
       const apiFee = Number(buildResult.entryFee);
-      const apiLev = Number(buildResult.newLeverage);
-      if (sdkQuote.openFee > 0 && Number.isFinite(apiFee) && apiFee > 0) {
-        const validation = this.validateApiQuote(
-          { entryFee: apiFee, newLeverage: Number.isFinite(apiLev) ? apiLev : 0 },
-          sdkQuote,
-        );
+      if (localEst.openFee > 0 && Number.isFinite(apiFee) && apiFee > 0) {
+        const validation = crossValidateWithEstimate({ entryFee: apiFee }, localEst);
         if (!validation.valid) {
           log.warn('ENGINE', `Cross-validation: ${validation.divergences.join('; ')}`);
           lines.push(`  ${chalk.yellow('⚠')} Quote divergence: ${validation.divergences.join('; ')}`);
@@ -615,290 +566,9 @@ export class ExecutionEngine implements IExecutionEngine {
     return { success: true, error: dim(`  Order (${command.action}) — Phase 2`) };
   }
 
-  // ─── Swap Handler (FULL PIPELINE) ──────────────────────────────────────
-
-  private async handleSwap(command: ParsedCommand): Promise<TxResult> {
-    const log = getLogger();
-    const audit = getAuditLog();
-    const metrics = getMetrics();
-    const { inputToken, outputToken, amount } = command.params;
-
-    if (!inputToken || !outputToken || !amount) {
-      return { success: false, error: err('  Usage: swap 50 USDC to SOL') };
-    }
-
-    metrics.recordSwapAttempt();
-    log.info('ENGINE', `Swap: ${amount} ${inputToken} → ${outputToken}`);
-
-    // ─── STEP 1: Resolve swap pool ────────────────────────────────────
-    const pool = resolveSwapPool(inputToken, outputToken);
-    if (!pool) {
-      return {
-        success: false,
-        error: err(`  No pool found with both ${inputToken} and ${outputToken}. Swap not supported.`),
-      };
-    }
-
-    // ─── STEP 2: Build swap intent ────────────────────────────────────
-    const intent: SwapIntent = {
-      action: Action.Swap,
-      inputToken,
-      outputToken,
-      amountIn: amount,
-      slippageBps: this.config.defaultSlippageBps,
-      pool,
-    };
-
-    // ─── STEP 3: Risk evaluation ──────────────────────────────────────
-    const risk = await this.risk.evaluateSwap(intent);
-
-    if (!risk.allowed) {
-      log.warn('ENGINE', `Swap blocked: ${risk.summary}`);
-      const lines = [
-        '',
-        `  ${err('SWAP BLOCKED')}`,
-        '',
-        ...risk.checks
-          .filter(c => c.status !== 'SAFE')
-          .map(c => `  ${c.status === 'BLOCKED' ? chalk.red('✗') : chalk.yellow('⚠')} ${c.message}`),
-        '',
-      ];
-      return { success: false, error: lines.join('\n') };
-    }
-
-    // ─── STEP 4: Get API quote (timed for freshness) ────────────────────
-    const startMs = Date.now();
-    let timedQuote: TimedQuote | null = null;
-    let quoteOutput = '?';
-    let quoteFee = 0;
-    let quotePayUsd = '';
-    let quoteReceiveUsd = '';
-
-    try {
-      const quote = await this.api.getSwapQuote({
-        inputTokenSymbol: inputToken,
-        outputTokenSymbol: outputToken,
-        inputAmountUi: String(amount),
-      });
-
-      if (quote.err) {
-        audit.log({ timestamp: new Date().toISOString(), action: 'swap', inputToken, outputToken, inputAmount: amount, status: 'failed', error: quote.err });
-        return { success: false, error: err(`  Swap quote failed: ${quote.err}`) };
-      }
-
-      quoteOutput = quote.outputAmountUi ?? quote.outputAmount ?? '?';
-      quoteFee = quote.entryFee ?? 0;
-      quotePayUsd = quote.youPayUsdUi ?? '';
-      quoteReceiveUsd = quote.youReceiveUsdUi ?? '';
-
-      const outputNum = parseFloat(quoteOutput);
-      if (Number.isFinite(outputNum) && outputNum > 0) {
-        timedQuote = {
-          timestamp: Date.now(),
-          outputAmount: outputNum,
-          outputUsd: parseFloat(quoteReceiveUsd) || 0,
-          fee: quoteFee,
-          inputAmount: amount,
-          inputToken,
-          outputToken,
-        };
-      }
-
-      log.debug('ENGINE', `Swap quote: ${amount} ${inputToken} → ${quoteOutput} ${outputToken}, fee=$${quoteFee}`);
-    } catch (e) {
-      if (!this.config.simulationMode && !this.config.devMode) {
-        return { success: false, error: err(`  Swap quote failed: ${e instanceof Error ? e.message : String(e)}`) };
-      }
-    }
-
-    // ─── STEP 5: Enhanced preview ───────────────────────────────────────
-    const estFee = quoteFee > 0 ? quoteFee : amount * 0.0007;
-    const quoteOutputNum = parseFloat(quoteOutput);
-
-    // Calculate rate for display
-    const rate = Number.isFinite(quoteOutputNum) && quoteOutputNum > 0
-      ? (quoteOutputNum / amount).toFixed(6)
-      : '—';
-    const slippagePct = (this.config.defaultSlippageBps / 100).toFixed(2);
-    const driftTolerance = '1.00'; // matches PRICE_DRIFT_THRESHOLD in quote-guard.ts
-
-    const lines = [
-      '',
-      `  ${accentBold('SWAP PREVIEW')}`,
-      `  ${dim('─'.repeat(52))}`,
-      '',
-      `  ${dim('Action:')}     ${chalk.bold('SWAP')}`,
-      `  ${dim('From:')}       ${chalk.white.bold(String(amount))} ${chalk.white.bold(inputToken)}`,
-      `  ${dim('To:')}         ${chalk.white.bold(quoteOutput)} ${chalk.white.bold(outputToken)}`,
-      `  ${dim('Rate:')}       ${dim(`1 ${inputToken} = ${rate} ${outputToken}`)}`,
-      `  ${dim('Pool:')}       ${dim(pool)}`,
-      `  ${dim('Est. Fee:')}   ${chalk.yellow(formatUsd(estFee))} ${dim(`(${((estFee / amount) * 100).toFixed(3)}%)`)}`,
-    ];
-
-    if (quotePayUsd) lines.push(`  ${dim('You Pay:')}    ${dim('$' + quotePayUsd)}`);
-    if (quoteReceiveUsd) lines.push(`  ${dim('You Get:')}    ${dim('$' + quoteReceiveUsd)}`);
-    lines.push(
-      `  ${dim('Slippage:')}   ${dim(`${slippagePct}%`)} ${dim(`(${this.config.defaultSlippageBps} bps)`)}`,
-      `  ${dim('Max Drift:')}  ${dim(`${driftTolerance}%`)}`,
-    );
-    lines.push(`  ${dim('─'.repeat(52))}`);
-
-    if (risk.mustConfirm) {
-      for (const c of risk.checks.filter(c => c.status === 'WARNING')) {
-        lines.push(`  ${chalk.yellow('⚠')} ${c.message}`);
-      }
-    }
-
-    // ─── STEP 6: Execute (if not simulation mode) ─────────────────────
-    if (this.config.simulationMode) {
-      lines.push('', `  ${dim('[SIMULATION MODE — no real transaction]')}`, '');
-      audit.log({ timestamp: new Date().toISOString(), action: 'swap', inputToken, outputToken, inputAmount: amount, outputAmount: timedQuote?.outputAmount, fees: estFee, status: 'preview', pool, slippageBps: this.config.defaultSlippageBps });
-      log.success('ENGINE', `Swap preview: ${amount} ${inputToken} → ${quoteOutput} ${outputToken}`);
-      return { success: true, error: lines.join('\n') };
-    }
-
-    if (!this.wallet.isConnected || !this.wallet.keypair) {
-      lines.push('', `  ${err('Wallet not connected — cannot execute swap')}`, '');
-      return { success: false, error: lines.join('\n') };
-    }
-
-    // ─── QUOTE FRESHNESS CHECK (TASK 2) ──────────────────────────────
-    if (timedQuote) {
-      const freshness = checkQuoteFreshness(timedQuote);
-      if (!freshness.fresh) {
-        audit.log({ timestamp: new Date().toISOString(), action: 'swap', inputToken, outputToken, inputAmount: amount, status: 'blocked', error: freshness.reason });
-        return { success: false, error: err(`  ${freshness.reason}`) };
-      }
-    }
-
-    // ─── BUILD TRANSACTION ────────────────────────────────────────────
-    log.info('ENGINE', 'Building swap transaction...');
-    let txBase64: string;
-    try {
-      const buildResult = await this.api.buildSwap({
-        inputTokenSymbol: inputToken,
-        outputTokenSymbol: outputToken,
-        inputAmountUi: String(amount),
-        owner: this.wallet.publicKey!.toBase58(),
-        slippageBps: this.config.defaultSlippageBps,
-      });
-
-      if (buildResult.err) {
-        audit.log({ timestamp: new Date().toISOString(), action: 'swap', inputToken, outputToken, inputAmount: amount, status: 'failed', error: buildResult.err });
-        return { success: false, error: err(`  Swap build failed: ${buildResult.err}`) };
-      }
-      if (!buildResult.transactionBase64) {
-        return { success: false, error: err('  API returned no transaction — cannot execute') };
-      }
-
-      // ─── PRICE DRIFT CHECK (TASK 1) ────────────────────────────────
-      if (timedQuote) {
-        const buildOutputNum = parseFloat(buildResult.outputAmountUi ?? '0');
-        const drift = checkPriceDrift(timedQuote.outputAmount, buildOutputNum);
-        if (!drift.acceptable) {
-          audit.log({ timestamp: new Date().toISOString(), action: 'swap', inputToken, outputToken, inputAmount: amount, status: 'blocked', error: drift.reason });
-          return { success: false, error: err(`  BLOCKED: ${drift.reason}`) };
-        }
-      }
-
-      // ─── TX-LEVEL SLIPPAGE (TASK 3) ─────────────────────────────────
-      // Flash API embeds slippageBps into the on-chain instruction as
-      // `priceWithSlippage`. The program checks execution_price <= priceWithSlippage.
-      // We already pass slippageBps to the API. The on-chain enforcement is
-      // handled by the Flash program — the transaction will fail on-chain if
-      // price moves beyond the slippage. This is verified by simulation.
-      log.debug('ENGINE', `TX-level slippage: ${this.config.defaultSlippageBps}bps embedded by API`);
-
-      txBase64 = buildResult.transactionBase64;
-    } catch (e) {
-      return { success: false, error: err(`  Swap build failed: ${e instanceof Error ? e.message : String(e)}`) };
-    }
-
-    // ─── PRE-EXECUTION STATE SNAPSHOT ─────────────────────────────────
-    const consistency = new StateConsistency(this.state);
-    const preSnapshot = await consistency.snapshot([inputToken, outputToken]);
-
-    // ─── EXECUTE THROUGH PIPELINE ─────────────────────────────────────
-    const tradeKey = `swap:${inputToken}:${outputToken}:${amount}`;
-    const intentParams = { action: 'swap', inputToken, outputToken, amount, ts: Math.floor(Date.now() / 1000) };
-    const rebuildFn = async (): Promise<string | null> => {
-      try {
-        const rebuild = await this.api.buildSwap({
-          inputTokenSymbol: inputToken,
-          outputTokenSymbol: outputToken,
-          inputAmountUi: String(amount),
-          owner: this.wallet.publicKey!.toBase58(),
-          slippageBps: this.config.defaultSlippageBps,
-        });
-        return rebuild.transactionBase64 ?? null;
-      } catch { return null; }
-    };
-
-    log.info('ENGINE', 'Executing swap through transaction pipeline...');
-    const txResult = await this.txPipeline.execute(txBase64, this.wallet.keypair, tradeKey, intentParams, rebuildFn);
-    const durationMs = Date.now() - startMs;
-
-    if (!txResult.success) {
-      lines.push('', `  ${err('Swap execution failed:')} ${txResult.error}`, '');
-      audit.log({ timestamp: new Date().toISOString(), action: 'swap', inputToken, outputToken, inputAmount: amount, txHash: txResult.signature, status: 'failed', error: txResult.error, durationMs, pool });
-      return { success: false, error: lines.join('\n'), signature: txResult.signature };
-    }
-
-    // ─── POST-EXECUTION VERIFICATION ──────────────────────────────────
-    const verifier = new PostVerifier(this.state);
-    const verification = await verifier.verifyBalanceChange(outputToken, preSnapshot.balances.get(outputToken) ?? 0, 'increase');
-
-    // ─── STATE CONSISTENCY CHECK (TASK 6) ─────────────────────────────
-    const consistencyResult = await consistency.verifyAfterTrade(preSnapshot, [
-      { type: 'balance_decrease', token: inputToken },
-      { type: 'balance_increase', token: outputToken },
-    ]);
-
-    const auditStatus: AuditRecord['status'] = consistencyResult.consistent ? 'confirmed' : 'inconsistent';
-
-    lines.push('');
-    lines.push(`  ${chalk.green('✓')} Swap executed: ${txResult.signature?.slice(0, 16)}...`);
-
-    if (verification.verified) {
-      lines.push(`  ${dim(verification.details)}`);
-    } else {
-      lines.push(`  ${chalk.yellow('⚠')} ${verification.details}`);
-      for (const w of verification.warnings) lines.push(`  ${dim(w)}`);
-    }
-
-    if (!consistencyResult.consistent) {
-      lines.push(`  ${chalk.red('⚠ STATE INCONSISTENCY DETECTED')}`);
-      for (const issue of consistencyResult.issues) lines.push(`  ${chalk.red('  ' + issue)}`);
-    }
-    lines.push('');
-
-    // ─── AUDIT LOG ────────────────────────────────────────────────────
-    audit.log({
-      timestamp: new Date().toISOString(),
-      action: 'swap',
-      inputToken,
-      outputToken,
-      inputAmount: amount,
-      outputAmount: timedQuote?.outputAmount,
-      fees: estFee,
-      txHash: txResult.signature,
-      status: auditStatus,
-      durationMs,
-      pool,
-      slippageBps: this.config.defaultSlippageBps,
-      retryCount: txResult.retryCount,
-    });
-
-    metrics.recordSwapSuccess(durationMs);
-    log.success('ENGINE', `Swap complete: ${txResult.signature?.slice(0, 16)}... (${durationMs}ms)`);
-
-    return {
-      success: true,
-      signature: txResult.signature,
-      fees: estFee,
-      error: lines.join('\n'),
-    };
-  }
+  // Swap removed — not supported via API (InvalidWhitelistAccount 6069).
+  // Use flash.trade website for swaps.
+  // Swap removed — not supported via API.
 
   // ─── LP Handler ───────────────────────────────────────────────────────
 
@@ -1258,9 +928,6 @@ export class ExecutionEngine implements IExecutionEngine {
         break;
       case Action.ClosePosition:
         parts.push(`close ${params.market ?? '?'}`);
-        break;
-      case Action.Swap:
-        parts.push(`swap ${params.amount ?? '?'} ${params.inputToken ?? '?'} to ${params.outputToken ?? '?'}`);
         break;
       default:
         parts.push(action);

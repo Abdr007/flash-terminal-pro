@@ -18,7 +18,6 @@ import { CommandRouter } from './cli/router.js';
 import { Repl } from './cli/repl.js';
 import { selectMode } from './cli/mode-selector.js';
 import { FlashApiClient } from './services/api-client.js';
-import { FlashSdkClient } from './services/sdk-client.js';
 import { RpcManager } from './services/rpc-manager.js';
 import { WalletManager } from './wallet/manager.js';
 import { TxPipeline } from './tx/pipeline.js';
@@ -32,7 +31,6 @@ async function main(): Promise<void> {
 
   // Initialize services
   const api = new FlashApiClient(config);
-  const sdk = new FlashSdkClient(config);
   const rpcManager = new RpcManager(config);
   const wallet = new WalletManager(config);
 
@@ -86,7 +84,7 @@ async function main(): Promise<void> {
   // ─── Single command mode (uses env SIMULATION_MODE) ─────────────────
   const args = process.argv.slice(2);
   if (args.length > 0) {
-    const execution = new ExecutionEngine(config, state, api, sdk, wallet, txPipeline, rpcManager);
+    const execution = new ExecutionEngine(config, state, api, wallet, txPipeline, rpcManager);
     const router = new CommandRouter(execution);
     const input = args.join(' ');
     const output = await router.route(input);
@@ -102,7 +100,7 @@ async function main(): Promise<void> {
   config.simulationMode = selectedMode === 'simulation';
 
   // Initialize execution engine with final config
-  const execution = new ExecutionEngine(config, state, api, sdk, wallet, txPipeline, rpcManager);
+  const execution = new ExecutionEngine(config, state, api, wallet, txPipeline, rpcManager);
   const router = new CommandRouter(execution);
 
   // Interactive REPL
