@@ -28,6 +28,7 @@ import {
   VersionedTransaction,
   MessageV0,
   ComputeBudgetProgram,
+  type AddressLookupTableAccount,
 } from '@solana/web3.js';
 import { AnchorProvider, Wallet } from '@coral-xyz/anchor';
 import { getLogger } from '../utils/logger.js';
@@ -407,6 +408,63 @@ export class SdkService {
     }
   }
 
+  // ─── ALT Resolution (matching flash-terminal's alt-resolver.ts) ────────
+
+  /** ALT cache: poolName → { tables, fetchedAt } */
+  private altCache = new Map<string, { tables: AddressLookupTableAccount[]; fetchedAt: number }>();
+  private static ALT_CACHE_TTL = 5 * 60_000; // 5 minutes
+
+  /**
+   * Resolve ALTs using SDK's built-in getOrLoadAddressLookupTable.
+   * Matches flash-terminal's resolveALTs() exactly:
+   *   1. Check cache (5min TTL)
+   *   2. Call perpClient.getOrLoadAddressLookupTable(poolConfig)
+   *   3. Validate tables contain addresses
+   *   4. Fallback to perpClient.addressLookupTables
+   *   5. Graceful degradation → empty array
+   */
+  private async resolveALTs(poolConfig: PoolConfig): Promise<AddressLookupTableAccount[]> {
+    const log = getLogger();
+    const cacheKey = poolConfig.poolName;
+
+    // Check cache
+    const cached = this.altCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < SdkService.ALT_CACHE_TTL) {
+      return cached.tables;
+    }
+
+    try {
+      const { addressLookupTables } = await this.client!.getOrLoadAddressLookupTable(poolConfig);
+
+      // Validate ALT content — tables without addresses are useless
+      const validTables = addressLookupTables.filter(
+        (t: AddressLookupTableAccount) => t?.state?.addresses?.length > 0,
+      );
+
+      if (validTables.length > 0) {
+        const totalAddrs = validTables.reduce((sum: number, t: AddressLookupTableAccount) => sum + t.state.addresses.length, 0);
+        log.info('ALT', `${cacheKey}: ${validTables.length} table(s), ${totalAddrs} addresses`);
+      } else if (addressLookupTables.length > 0) {
+        log.info('ALT', `${cacheKey}: ${addressLookupTables.length} table(s) loaded but none contain addresses`);
+      }
+
+      this.altCache.set(cacheKey, { tables: addressLookupTables, fetchedAt: Date.now() });
+      return addressLookupTables;
+    } catch (err) {
+      log.info('ALT', `Failed to load ALTs for ${cacheKey}: ${err}`);
+
+      // Fallback: check if SDK has previously loaded tables
+      const clientAny = this.client as unknown as { addressLookupTables?: AddressLookupTableAccount[] };
+      if (clientAny.addressLookupTables?.length) {
+        log.info('ALT', `Using perpClient.addressLookupTables fallback (${clientAny.addressLookupTables.length} tables)`);
+        this.altCache.set(cacheKey, { tables: clientAny.addressLookupTables, fetchedAt: Date.now() });
+        return clientAny.addressLookupTables;
+      }
+
+      return [];
+    }
+  }
+
   // ─── Transaction Building ─────────────────────────────────────────────
 
   private async buildTx(
@@ -415,21 +473,15 @@ export class SdkService {
     keypair: Keypair,
     poolConfig: PoolConfig,
   ): Promise<SdkTxResult | null> {
-    if (!this.connection) return null;
+    if (!this.connection || !this.client) return null;
 
     try {
       const cuLimit = ComputeBudgetProgram.setComputeUnitLimit({ units: this.config.computeUnitLimit });
       const cuPrice = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: this.config.computeUnitPrice });
       const allIxs = [cuLimit, cuPrice, ...instructions];
 
-      // Load ALTs
-      let alts: import('@solana/web3.js').AddressLookupTableAccount[] = [];
-      try {
-        for (const addr of (poolConfig.addressLookupTableAddresses ?? [])) {
-          const result = await this.connection.getAddressLookupTable(addr);
-          if (result.value) alts.push(result.value);
-        }
-      } catch { /* continue without ALTs */ }
+      // Resolve ALTs via SDK (matching flash-terminal)
+      const alts = await this.resolveALTs(poolConfig);
 
       const { blockhash } = await this.connection.getLatestBlockhash('confirmed');
       const message = MessageV0.compile({
@@ -455,20 +507,15 @@ export class SdkService {
     keypair: Keypair,
     poolConfig: PoolConfig,
   ): Promise<void> {
-    if (!this.connection) return;
+    if (!this.connection || !this.client) return;
     const log = getLogger();
 
     try {
       const cuLimit = ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 });
       const cuPrice = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: this.config.computeUnitPrice });
 
-      let alts: import('@solana/web3.js').AddressLookupTableAccount[] = [];
-      try {
-        for (const addr of (poolConfig.addressLookupTableAddresses ?? [])) {
-          const result = await this.connection!.getAddressLookupTable(addr);
-          if (result.value) alts.push(result.value);
-        }
-      } catch { /* ok */ }
+      // Resolve ALTs via SDK (matching flash-terminal)
+      const alts = await this.resolveALTs(poolConfig);
 
       const { blockhash } = await this.connection.getLatestBlockhash('confirmed');
       const message = MessageV0.compile({

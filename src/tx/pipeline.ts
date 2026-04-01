@@ -57,7 +57,7 @@ const ALL_ALLOWED = new Set([...SYSTEM_PROGRAMS, ...FLASH_PROGRAMS]);
 
 const MAX_INSTRUCTIONS = 12;
 const MAX_IX_DATA_SIZE = 2048;
-const MAX_ACCOUNTS_PER_IX = 64;
+const MAX_ACCOUNTS_PER_IX = 64; // SDK earn/FAF txs use ALTs but still need high limit for raw account refs
 const CU_LIMIT_CEILING = 1_400_000;
 const CU_PRICE_CEILING = 10_000_000;
 const CU_EXHAUSTION_THRESHOLD = 0.9;
