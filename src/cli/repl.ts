@@ -39,6 +39,10 @@ export class Repl {
       historySize: 200,
     });
 
+    // Give execution engine access to readline for monitor/TUI commands
+    const eng = (this.router as unknown as { engine: { rl: Interface | null } }).engine;
+    eng.rl = this.rl;
+
     this.rl.prompt();
 
     this.rl.on('line', async (line: string) => {

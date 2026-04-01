@@ -77,16 +77,17 @@ export async function runMonitor(
   state: IStateEngine,
   api: FlashApiClient,
   _wallet: WalletManager,
+  rl?: import('readline').Interface | null,
 ): Promise<string> {
   let running = true;
   const renderer = new TermRenderer();
 
-  // Get tradeable market symbols (exclude USDC, WSOL, XAUT, JitoSOL etc.)
+  // Get tradeable market symbols
   const markets = await state.getMarkets();
-  // Use exact symbol casing from API for matching
   const tradeableSymbols = new Set(markets.map(m => m.symbol));
 
-  // Pause readline, enter raw mode for 'q' key
+  // Pause readline BEFORE entering raw mode (matching flash-terminal)
+  if (rl) rl.pause();
   const wasRaw = process.stdin.isRaw;
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
   process.stdin.resume();
@@ -147,16 +148,27 @@ export async function runMonitor(
         clearInterval(interval);
         renderer.leaveAltScreen();
 
+        // Restore terminal: pause stdin, exit raw mode
         process.stdin.pause();
         if (process.stdin.isTTY) process.stdin.setRawMode(wasRaw ?? false);
 
-        // Drain remaining input before returning to readline
+        // Drain remaining input, then resume readline
         const drain2 = () => {};
         process.stdin.resume();
         process.stdin.on('data', drain2);
         setTimeout(() => {
           process.stdin.removeListener('data', drain2);
           process.stdin.pause();
+
+          // Resume readline and clear any leaked chars
+          if (rl) {
+            rl.resume();
+            if ((rl as unknown as { terminal: boolean }).terminal) {
+              (rl as unknown as { line: string }).line = '';
+              (rl as unknown as { cursor: number }).cursor = 0;
+              rl.prompt();
+            }
+          }
           resolve();
         }, 100);
       }

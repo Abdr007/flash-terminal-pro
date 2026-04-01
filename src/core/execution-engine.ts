@@ -78,6 +78,7 @@ export class ExecutionEngine implements IExecutionEngine {
   txPipeline: TxPipeline;
   private rpcManager: RpcManager | null = null;
   private sdkService: SdkService | null = null;
+  rl: import('readline').Interface | null = null;
 
   constructor(
     private config: FlashXConfig,
@@ -384,7 +385,7 @@ export class ExecutionEngine implements IExecutionEngine {
         return this.handleDoctor();
       case Action.Monitor: {
         const { runMonitor } = await import('../cli/monitor.js');
-        const output = await runMonitor(this.state, this.api, this.wallet);
+        const output = await runMonitor(this.state, this.api, this.wallet, this.rl);
         return { success: true, error: output };
       }
 
