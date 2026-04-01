@@ -45,37 +45,41 @@ export async function handleEarnOverview(api: FlashApiClient): Promise<TxResult>
   const registry = getPoolRegistry();
   const metrics = await getPoolMetrics(api);
 
-  const lines: string[] = [header('FLASH EARN — LIQUIDITY POOLS')];
-
-  lines.push(tableHeader([
-    { label: 'Pool', width: 12 },
-    { label: 'TVL', width: 11 },
-    { label: 'FLP', width: 9 },
-    { label: 'APY', width: 9 },
-    { label: 'Risk', width: 7 },
-    { label: 'Fee', width: 5 },
-    { label: 'Assets', width: 18 },
-  ]));
+  const lines: string[] = [
+    '',
+    `  ${chalk.hex('#00FF88').bold('FLASH LIQUIDITY POOLS')}`,
+    '',
+    `  ${'Pool'.padEnd(12)} ${'TVL'.padEnd(10)} ${'FLP'.padEnd(10)} ${'sFLP'.padEnd(10)} ${'Est. APY'.padEnd(12)} ${'Fee %'.padEnd(8)} Assets`,
+    `  ${dim('─'.repeat(72))}`,
+  ];
 
   for (const pool of registry) {
     const m = metrics.get(pool.poolId);
     if (!m) continue;
-    const risk = classifyRisk(m.tvl, m.apy7d);
 
-    lines.push(tableRow([
-      pool.aliases[0],
-      usd(m.tvl),
-      '$' + m.flpPrice.toFixed(4),
-      apyColor(m.apy7d),
-      riskBadge(risk),
-      (pool.feeShare * 100).toFixed(0) + '%',
-      pool.assets.slice(0, 3).join(' ') + (pool.assets.length > 3 ? '...' : ''),
-    ], [12, 11, 9, 9, 7, 5, 18]));
+    const tvl = m.tvl >= 1e6 ? `$${(m.tvl / 1e6).toFixed(1)}M` : `$${(m.tvl / 1e3).toFixed(0)}K`;
+    const flp = `$${m.flpPrice.toFixed(3)}`;
+    const sflp = m.sflpPrice ? `$${m.sflpPrice.toFixed(3)}` : '-';
+    const apy = m.apy7d ? `~${m.apy7d.toFixed(1)}%` : '-';
+    const fee = `${(pool.feeShare * 100).toFixed(0)}%`;
+    const assets = pool.assets.slice(0, 3).join(' ');
+
+    lines.push(
+      `  ${chalk.cyan(pool.aliases[0].padEnd(12))} ${tvl.padEnd(10)} ${chalk.green(flp.padEnd(10))} ${sflp.padEnd(10)} ${chalk.green(apy.padEnd(12))} ${fee.padEnd(8)} ${dim(assets)}`,
+    );
   }
 
   lines.push('');
-  lines.push(`  ${chalk.green('FLP')} = auto-compound  ${chalk.cyan('sFLP')} = USDC hourly rewards`);
-  lines.push(divider());
+  lines.push(`  ${chalk.bold('Commands')}`);
+  lines.push('');
+  lines.push(`    ${chalk.cyan('earn info <pool>')}            Pool details`);
+  lines.push(`    ${chalk.cyan('earn deposit <pool> <$>')}     Mint FLP (auto-compound)`);
+  lines.push(`    ${chalk.cyan('earn withdraw <pool> <%>')}    Burn FLP → USDC`);
+  lines.push(`    ${chalk.cyan('earn stake <pool> <$>')}       Mint sFLP (USDC rewards)`);
+  lines.push(`    ${chalk.cyan('earn unstake <pool> <%>')}     Burn sFLP → USDC`);
+  lines.push(`    ${chalk.cyan('earn claim <pool>')}           Claim sFLP rewards`);
+  lines.push(`    ${chalk.cyan('earn positions')}              Your active positions`);
+  lines.push('');
   return { success: true, error: lines.join('\n') };
 }
 

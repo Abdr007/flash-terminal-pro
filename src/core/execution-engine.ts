@@ -59,6 +59,7 @@ import {
   colorSide,
   colorPercent,
   accentBold,
+  accent,
   dim,
   warn,
   err,
@@ -1145,7 +1146,7 @@ export class ExecutionEngine implements IExecutionEngine {
     ];
 
     for (const m of markets) {
-      lines.push(`  ${pad(m.symbol, 13)}${dim('→')} ${accentBold(m.pool)}`);
+      lines.push(`  ${m.symbol.padEnd(12)}  ${dim('→')}  ${accent(m.pool)}`);
     }
 
     lines.push('');

@@ -6,7 +6,7 @@
  */
 
 import chalk from 'chalk';
-import { header, divider, kv, kvBold, section, usd, dim, allocBar, tableHeader, tableRow } from '../cli/display.js';
+import { header, titleBlock, divider, kv, kvBold, section, usd, dim, allocBar, tableHeader, tableRow } from '../cli/display.js';
 import { VIP_TIERS, VOLTAGE_TIERS, getNextTier, formatFaf } from './faf-registry.js';
 import { getFafStakeInfo, getFafUnstakeRequests, getVoltageInfo, getFafBalance } from './faf-data.js';
 import type { SdkService } from '../services/sdk-service.js';
@@ -34,7 +34,7 @@ async function getStakeContext(sdkService: SdkService | null, wallet: WalletMana
 export async function handleFafDashboard(sdkService: SdkService | null, wallet: WalletManager): Promise<TxResult> {
   const ctx = await getStakeContext(sdkService, wallet);
 
-  const lines: string[] = [header('FAF STAKING DASHBOARD')];
+  const lines: string[] = [titleBlock('FAF STAKING DASHBOARD', 50)];
 
   if (!ctx) {
     lines.push(`  ${dim('Connect wallet in Live mode to view FAF data.')}`);
@@ -114,41 +114,33 @@ export async function handleFafTier(sdkService: SdkService | null, wallet: Walle
   const stake = ctx ? await getFafStakeInfo(ctx.perpClient, ctx.poolConfig, ctx.publicKey) : null;
 
   const currentTier = stake ? stake.tier : VIP_TIERS[0];
-  const nextTier = getNextTier(currentTier.level);
+  void getNextTier(currentTier.level); // available if needed
 
-  const lines: string[] = [header('VIP TIER SYSTEM')];
+  const lines: string[] = [
+    '',
+    `  ${chalk.hex('#00FF88').bold('VIP TIER LEVELS')}`,
+    `  ${dim('─'.repeat(65))}`,
+    '',
+  ];
 
-  if (stake) {
-    lines.push(kvBold('Your Tier', tierBadge(currentTier.level, currentTier.name)));
-    lines.push(kv('Staked', formatFaf(stake.stakedAmount)));
-    lines.push(kv('Fee Discount', chalk.green(currentTier.feeDiscount + '%')));
-    lines.push(kv('Referral Rebate', currentTier.referralRebate + '%'));
+  // Current tier info
+  const currentLevel = stake ? stake.level : 0;
 
-    if (nextTier) {
-      const needed = nextTier.fafRequired - stake.stakedAmount;
-      lines.push('');
-      lines.push(`  ${dim('Next:')} ${tierBadge(nextTier.level, nextTier.name)} ${dim('— need')} ${chalk.yellow(formatFaf(needed))} ${dim('more')}`);
-      lines.push(`  ${dim('Benefit: ' + nextTier.feeDiscount + '% fee discount')}`);
-    }
-  }
-
-  lines.push(section('ALL TIERS'));
-  lines.push(tableHeader([
-    { label: 'Tier', width: 10 },
-    { label: 'FAF Required', width: 14 },
-    { label: 'Fee Discount', width: 14 },
-    { label: 'Referral', width: 10 },
-  ]));
+  // Tier table header (matching flash-terminal exactly: 6 columns)
+  lines.push(`  ${'Level'.padEnd(10)} ${'FAF Required'.padEnd(14)} ${'Fee Disc.'.padEnd(12)} ${'Referral'.padEnd(12)} ${'Spot LO'.padEnd(10)} DCA`);
+  lines.push(`  ${dim('─'.repeat(65))}`);
 
   for (const t of VIP_TIERS) {
-    const isCurrent = stake && t.level === currentTier.level;
-    const marker = isCurrent ? chalk.green('◀') : ' ';
-    lines.push(tableRow([
-      `${t.name} ${marker}`, formatFaf(t.fafRequired), t.feeDiscount + '%', t.referralRebate + '%',
-    ], [10, 14, 14, 10]));
+    const marker = t.level === currentLevel ? chalk.green(' ←') : '';
+    const faf = t.fafRequired === 0 ? '0' : formatFaf(t.fafRequired);
+    lines.push(
+      `  ${`Level ${t.level}`.padEnd(10)} ${faf.padEnd(14)} ${(t.feeDiscount + '%').padEnd(12)} ${(t.referralRebate + '%').padEnd(12)} ${(t.spotLoDiscount + '%').padEnd(10)} ${t.dcaDiscount}%${marker}`,
+    );
   }
 
-  lines.push(divider());
+  lines.push('');
+  lines.push(dim('  Stake FAF to unlock fee discounts and higher referral rebates.'));
+  lines.push('');
   return { success: true, error: lines.join('\n') };
 }
 

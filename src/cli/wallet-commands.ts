@@ -16,7 +16,7 @@ const MUTED = chalk.hex('#6B7B73');
 const POSITIVE = chalk.green;
 
 function titleBlock(title: string): string {
-  return `\n  ${ACCENT_BOLD(title)}\n  ${MUTED('─'.repeat(Math.max(title.length + 2, 20)))}`;
+  return `\n  ${ACCENT_BOLD(title)}\n  ${MUTED('─'.repeat(40))}`;
 }
 
 function pair(key: string, value: string): string {

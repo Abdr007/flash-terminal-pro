@@ -16,16 +16,18 @@ export interface VipTier {
   fafRequired: number;
   feeDiscount: number;
   referralRebate: number;
+  spotLoDiscount: number;
+  dcaDiscount: number;
 }
 
 export const VIP_TIERS: VipTier[] = [
-  { level: 0, name: 'None',    fafRequired: 0,         feeDiscount: 0,    referralRebate: 2 },
-  { level: 1, name: 'Level 1', fafRequired: 20_000,    feeDiscount: 2.5,  referralRebate: 2.5 },
-  { level: 2, name: 'Level 2', fafRequired: 40_000,    feeDiscount: 3.5,  referralRebate: 3 },
-  { level: 3, name: 'Level 3', fafRequired: 100_000,   feeDiscount: 5,    referralRebate: 4 },
-  { level: 4, name: 'Level 4', fafRequired: 200_000,   feeDiscount: 7,    referralRebate: 5.5 },
-  { level: 5, name: 'Level 5', fafRequired: 1_000_000, feeDiscount: 9.5,  referralRebate: 7.5 },
-  { level: 6, name: 'Level 6', fafRequired: 2_000_000, feeDiscount: 12,   referralRebate: 10 },
+  { level: 0, name: 'None',    fafRequired: 0,         feeDiscount: 0,    referralRebate: 2,   spotLoDiscount: 10, dcaDiscount: 10 },
+  { level: 1, name: 'Level 1', fafRequired: 20_000,    feeDiscount: 2.5,  referralRebate: 2.5, spotLoDiscount: 10, dcaDiscount: 10 },
+  { level: 2, name: 'Level 2', fafRequired: 40_000,    feeDiscount: 3.5,  referralRebate: 3,   spotLoDiscount: 15, dcaDiscount: 15 },
+  { level: 3, name: 'Level 3', fafRequired: 100_000,   feeDiscount: 5,    referralRebate: 4,   spotLoDiscount: 20, dcaDiscount: 20 },
+  { level: 4, name: 'Level 4', fafRequired: 200_000,   feeDiscount: 7,    referralRebate: 5.5, spotLoDiscount: 25, dcaDiscount: 25 },
+  { level: 5, name: 'Level 5', fafRequired: 1_000_000, feeDiscount: 9.5,  referralRebate: 7.5, spotLoDiscount: 30, dcaDiscount: 30 },
+  { level: 6, name: 'Level 6', fafRequired: 2_000_000, feeDiscount: 12,   referralRebate: 10,  spotLoDiscount: 35, dcaDiscount: 35 },
 ];
 
 // ─── Voltage Tiers ──────────────────────────────────────────────────────────
