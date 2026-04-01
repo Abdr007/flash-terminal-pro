@@ -280,20 +280,31 @@ async function interactiveWalletSetup(config: FlashXConfig, wallet: WalletManage
     console.log(`    ${CMD('4)')} Create new wallet`);
     console.log('');
 
-    const choice = await ask(`  ${chalk.yellow('>')} `);
+    while (true) {
+      const choice = await ask(`  ${chalk.yellow('>')} `);
 
-    if (choice === '1') {
-      console.log(chalk.green(`\n  Wallet connected: ${defaultName}`));
-      return true;
+      if (choice === '1') {
+        console.log(chalk.green(`\n  Wallet connected: ${defaultName}`));
+        return true;
+      }
+      if (choice === '2') {
+        const picked = await showWalletPicker(names, defaultName, store, wallet);
+        if (picked) return true;
+        // If picker returned false (back), show menu again
+        continue;
+      }
+      if (choice === '3') {
+        const imported = await importWalletFlow(config, store, wallet);
+        if (imported) return true;
+        continue;
+      }
+      if (choice === '4') {
+        const imported = await importWalletFlow(config, store, wallet);
+        if (imported) return true;
+        continue;
+      }
+      console.log(MUTED('  Enter 1, 2, 3, or 4.'));
     }
-    if (choice === '2' && names.length > 1) {
-      return showWalletPicker(names, defaultName, store, wallet);
-    }
-    if (choice === '3' || choice === '2') {
-      return importWalletFlow(config, store, wallet);
-    }
-    // choice 4 or default — fall through to import
-    return importWalletFlow(config, store, wallet);
   }
 
   // No wallet connected — show picker if wallets exist
@@ -330,6 +341,9 @@ async function interactiveWalletSetup(config: FlashXConfig, wallet: WalletManage
 }
 
 async function showWalletPicker(names: string[], defaultName: string, store: WalletStore, wallet: WalletManager): Promise<boolean> {
+  // Matching flash-terminal's "Select wallet:" screen
+  console.log('');
+  console.log(chalk.bold('  Select wallet:'));
   console.log('');
   for (let i = 0; i < names.length; i++) {
     const entry = store.get(names[i]);
@@ -338,36 +352,61 @@ async function showWalletPicker(names: string[], defaultName: string, store: Wal
     console.log(`    ${CMD(String(i + 1) + ')')} ${names[i]} ${MUTED(`(${addr})`)}${tag}`);
   }
   console.log('');
-  const choice = await ask(`  ${chalk.yellow('>')} `);
-  const idx = parseInt(choice, 10) - 1;
-  if (idx >= 0 && idx < names.length) {
-    try {
-      const entry = store.get(names[idx]);
-      if (entry) {
-        wallet.loadFromFile(entry.path);
-        store.setDefault(names[idx]);
-        console.log(chalk.green(`\n  Wallet connected: ${names[idx]}`));
-        return true;
+  console.log(`    ${CMD('i)')} Import new wallet`);
+  console.log(`    ${CMD('q)')} Back`);
+  console.log('');
+
+  while (true) {
+    const choice = await ask(`  ${chalk.yellow('>')} `);
+    if (choice === 'q' || choice === 'Q') return false;
+    if (choice === 'i' || choice === 'I') return false; // fall to import
+
+    const idx = parseInt(choice, 10) - 1;
+    if (idx >= 0 && idx < names.length) {
+      try {
+        const entry = store.get(names[idx]);
+        if (entry) {
+          wallet.loadFromFile(entry.path);
+          store.setDefault(names[idx]);
+          console.log(chalk.green(`\n  Wallet connected: ${names[idx]}`));
+          return true;
+        }
+      } catch (e) {
+        console.log(chalk.red(`  Failed to load: ${e instanceof Error ? e.message : String(e)}`));
       }
-    } catch { /* fall through */ }
+    }
+    console.log(MUTED(`  Enter 1-${names.length}, i, or q.`));
   }
-  return false;
 }
 
-async function importWalletFlow(config: FlashXConfig, store: WalletStore, wallet: WalletManager): Promise<boolean> {
+async function importWalletFlow(_config: FlashXConfig, store: WalletStore, wallet: WalletManager): Promise<boolean> {
   console.log(MUTED('\n  Enter path to keypair JSON file:'));
+  console.log(MUTED('  Example: ~/.config/solana/id.json'));
+  console.log('');
+
   const path = await ask(`  ${MUTED('Path:')} `);
-  if (!path) return false;
+  if (!path) {
+    console.log(MUTED('  Cancelled.'));
+    return false;
+  }
+
   const resolved = path.startsWith('~') ? path.replace('~', process.env['HOME'] ?? '') : path;
-  if (!existsSync(resolved)) { console.log(chalk.red(`  File not found: ${resolved}`)); return false; }
+  if (!existsSync(resolved)) {
+    console.log(chalk.red(`  File not found: ${resolved}`));
+    return false;
+  }
+
   const name = await ask(`  ${MUTED('Wallet name:')} `);
-  if (!name) return false;
+  if (!name) {
+    console.log(MUTED('  Wallet name cannot be empty.'));
+    return false;
+  }
+
   try {
     store.register(name, resolved);
     store.setDefault(name);
     wallet.loadFromFile(resolved);
-    console.log(chalk.green(`  Wallet "${name}" connected (${wallet.shortAddress})`));
-    void config;
+    console.log(chalk.green(`\n  Wallet "${name}" connected (${wallet.shortAddress})`));
     return true;
   } catch (e) {
     console.log(chalk.red(`  ${e instanceof Error ? e.message : String(e)}`));
