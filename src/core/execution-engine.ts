@@ -241,6 +241,10 @@ export class ExecutionEngine implements IExecutionEngine {
       case Action.FafPoints:
         return handleFafPoints(this.sdkService, this.wallet);
       case Action.FafRequests:
+        if (command.params.orderId !== undefined) {
+          const { handleFafCancel } = await import('../faf/faf-handlers.js');
+          return handleFafCancel(command.params.orderId, this.sdkService, this.wallet);
+        }
         return handleFafRequests(this.sdkService, this.wallet);
       case Action.FafStake:
         return handleFafStake(command.params.amount ?? 0, this.sdkService, this.wallet);

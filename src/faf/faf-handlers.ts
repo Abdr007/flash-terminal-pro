@@ -6,7 +6,7 @@
  */
 
 import chalk from 'chalk';
-import { header, divider, kv, kvBold, section, usd, dim, warning, tableHeader, tableRow } from '../cli/display.js';
+import { header, divider, kv, kvBold, section, usd, dim, warning, allocBar, tableHeader, tableRow } from '../cli/display.js';
 import { VIP_TIERS, VOLTAGE_TIERS, getNextTier, formatFaf, UNSTAKE_UNLOCK_DAYS } from './faf-registry.js';
 import { getFafStakeInfo, getFafUnstakeRequests, getVoltageInfo, getFafBalance } from './faf-data.js';
 import type { SdkService } from '../services/sdk-service.js';
@@ -61,8 +61,21 @@ export async function handleFafDashboard(sdkService: SdkService | null, wallet: 
   // Staking
   lines.push(kvBold('Staked FAF', stake ? chalk.white.bold(formatFaf(stake.stakedAmount)) : dim('0 FAF')));
   lines.push(kv('Wallet FAF', formatFaf(bal)));
+  lines.push(kv('Total FAF', formatFaf((stake?.stakedAmount ?? 0) + bal)));
   lines.push(kv('VIP Tier', stake ? tierBadge(stake.tier.level, stake.tier.name) : dim('None')));
   lines.push(kv('Fee Discount', stake ? chalk.green(stake.tier.feeDiscount + '%') : dim('0%')));
+
+  // Progress to next tier
+  if (stake) {
+    const nextT = getNextTier(stake.tier.level);
+    if (nextT) {
+      const progress = Math.min((stake.stakedAmount / nextT.fafRequired) * 100, 100);
+      const bar = allocBar(progress, 15);
+      lines.push(kv('Next Tier', `${tierBadge(nextT.level, nextT.name)} ${bar} ${progress.toFixed(0)}%`));
+    } else {
+      lines.push(kv('Tier', chalk.green.bold('MAX LEVEL')));
+    }
+  }
 
   // Rewards
   if (stake && (stake.pendingRewards > 0 || stake.pendingRevenue > 0)) {
@@ -345,15 +358,43 @@ export async function handleFafRequests(sdkService: SdkService | null, wallet: W
 
 // ─── 10. faf cancel <index> ─────────────────────────────────────────────────
 
-export async function handleFafCancel(index: number): Promise<TxResult> {
+export async function handleFafCancel(
+  index: number,
+  sdkService: SdkService | null,
+  wallet: WalletManager,
+): Promise<TxResult> {
   const lines: string[] = [header('CANCEL UNSTAKE REQUEST')];
 
-  lines.push(kv('Request #', String(index)));
-  lines.push('');
-  lines.push(`  ${chalk.yellow('Cancel requires on-chain transaction.')}`);
-  lines.push(`  ${dim('Cancelled FAF will be returned to your staked balance.')}`);
-  lines.push(`  ${dim('Use flash.trade website to cancel unstake requests.')}`);
+  lines.push(kv('Request #', chalk.white.bold(String(index))));
 
+  // Validate request exists
+  const ctx = await getStakeContext(sdkService, wallet);
+  if (ctx) {
+    const requests = await getFafUnstakeRequests(ctx.perpClient, ctx.poolConfig, ctx.publicKey);
+    const target = requests.find(r => r.index === index);
+    if (!target) {
+      lines.push('');
+      lines.push(`  ${chalk.red('Request #' + index + ' not found.')}`);
+      lines.push(`  ${dim('Use "faf requests" to see active requests.')}`);
+      lines.push(divider());
+      return { success: false, error: lines.join('\n') };
+    }
+    lines.push(kv('Amount', formatFaf(target.amount)));
+    lines.push(kv('Status', target.isUnlocked ? chalk.green('Unlocked') : chalk.yellow(target.daysRemaining + 'd remaining')));
+  }
+
+  lines.push('');
+  lines.push(`  ${chalk.yellow('Cancel will return FAF to your staked balance.')}`);
+
+  // Try SDK execution
+  if (!sdkService || !wallet.isConnected || !wallet.keypair) {
+    lines.push(`  ${dim('Connect wallet in Live mode to cancel.')}`);
+    lines.push(divider());
+    return { success: true, error: lines.join('\n') };
+  }
+
+  // SDK cancel: cancelUnstakeTokenRequest
+  lines.push(`  ${dim('Cancel transaction requires SDK. Use flash.trade website.')}`);
   lines.push(divider());
   lines.push(flowHint('faf requests │ faf'));
   return { success: true, error: lines.join('\n') };
