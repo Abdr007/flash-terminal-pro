@@ -538,6 +538,8 @@ export class ExecutionEngine implements IExecutionEngine {
   }
 
   private async handleCollateral(command: ParsedCommand): Promise<TxResult> {
+    const log = getLogger();
+    const audit = getAuditLog();
     const isAdd = command.action === Action.AddCollateral;
     const { market, collateral, amount, side } = command.params;
     const value = collateral ?? amount;
@@ -545,35 +547,186 @@ export class ExecutionEngine implements IExecutionEngine {
       return { success: false, error: err(`  Usage: ${isAdd ? 'add' : 'remove'} $50 ${isAdd ? 'to' : 'from'} SOL`) };
     }
 
-    return {
-      success: true,
-      error: [
-        '',
-        `  ${accentBold(isAdd ? 'ADD COLLATERAL' : 'REMOVE COLLATERAL')}`,
-        '',
-        `  ${dim('Market:')}  ${market}${side ? ' ' + colorSide(side) : ''}`,
-        `  ${dim('Amount:')}  ${formatUsd(value)}`,
-        '',
-        `  ${dim('[Phase 2]')}`,
-        '',
-      ].join('\n'),
-    };
+    // Find position
+    const position = await this.state.getPosition(market, side);
+    if (!position) {
+      return { success: false, error: err(`  No open ${market} position found`) };
+    }
+
+    const lines = [
+      '',
+      `  ${accentBold(isAdd ? 'ADD COLLATERAL' : 'REMOVE COLLATERAL')}`,
+      `  ${dim('─'.repeat(48))}`,
+      '',
+      `  ${dim('Market:')}  ${chalk.white.bold(market)} ${colorSide(position.side)}`,
+      `  ${dim('Amount:')}  ${chalk.white.bold(formatUsd(value))}`,
+      `  ${dim('─'.repeat(48))}`,
+    ];
+
+    if (this.config.simulationMode) {
+      lines.push(`  ${dim('[SIMULATION MODE]')}`, '');
+      return { success: true, error: lines.join('\n') };
+    }
+
+    if (!this.wallet.isConnected || !this.wallet.keypair) {
+      lines.push(`  ${err('Wallet not connected')}`, '');
+      return { success: false, error: lines.join('\n') };
+    }
+
+    log.info('ENGINE', `${isAdd ? 'Add' : 'Remove'} collateral: ${market} $${value}`);
+    const startMs = Date.now();
+
+    try {
+      const apiMethod = isAdd ? 'buildAddCollateral' : 'buildRemoveCollateral';
+      const params = isAdd
+        ? { positionKey: position.pubkey, depositAmountUi: String(value), depositTokenSymbol: 'USDC', owner: this.wallet.publicKey!.toBase58() }
+        : { positionKey: position.pubkey, withdrawAmountUsdUi: String(value), withdrawTokenSymbol: 'USDC', owner: this.wallet.publicKey!.toBase58() };
+
+      const buildResult = await this.api[apiMethod](params) as Record<string, unknown>;
+      if (buildResult['err']) return { success: false, error: err(`  Build failed: ${buildResult['err']}`) };
+
+      const txBase64 = buildResult['transactionBase64'] as string;
+      if (!txBase64) return { success: false, error: err('  API returned no transaction') };
+
+      const tradeKey = `collateral:${market}:${isAdd ? 'add' : 'remove'}:${value}`;
+      const txResult = await this.txPipeline.execute(txBase64, this.wallet.keypair, tradeKey);
+      const durationMs = Date.now() - startMs;
+
+      if (!txResult.success) {
+        lines.push('', `  ${err(txResult.error ?? 'Failed')}`, '');
+        return { success: false, error: lines.join('\n') };
+      }
+
+      lines.push('', `  ${chalk.green('✓')} Collateral ${isAdd ? 'added' : 'removed'}: ${txResult.signature?.slice(0, 16)}...`, `  ${dim(`Duration: ${durationMs}ms`)}`, '');
+      audit.log({ timestamp: new Date().toISOString(), action: isAdd ? 'add_collateral' : 'remove_collateral', market, collateral: value, txHash: txResult.signature, status: 'confirmed', durationMs });
+      return { success: true, signature: txResult.signature, error: lines.join('\n') };
+    } catch (e) {
+      return { success: false, error: err(`  ${e instanceof Error ? e.message : String(e)}`) };
+    }
   }
 
-  // ─── Order Handlers ─────────────────────────────────────────────────────
+  // ─── Order Handlers (TP/SL via API) ───────────────────────────────────
 
   private async handleOrder(command: ParsedCommand): Promise<TxResult> {
-    return { success: true, error: dim(`  Order (${command.action}) — Phase 2`) };
+    const log = getLogger();
+    const audit = getAuditLog();
+    const { market, side, triggerPrice, orderId } = command.params;
+
+    // Cancel
+    if (command.action === Action.CancelOrder || command.action === Action.CancelAllOrders) {
+      if (!market) return { success: false, error: err('  Usage: cancel SOL long') };
+      if (!this.wallet.isConnected || !this.wallet.keypair) {
+        return { success: false, error: err('  Wallet not connected') };
+      }
+
+      if (this.config.simulationMode) {
+        return { success: true, error: dim(`  [SIMULATION] Would cancel ${command.action === Action.CancelAllOrders ? 'all' : ''} orders for ${market}`) };
+      }
+
+      try {
+        const position = await this.state.getPosition(market, side);
+        const resolvedSide = side ?? position?.side ?? 'LONG';
+
+        let buildResult: Record<string, unknown>;
+        if (command.action === Action.CancelAllOrders) {
+          buildResult = await this.api.buildCancelAllTriggerOrders({
+            marketSymbol: market, side: resolvedSide, owner: this.wallet.publicKey!.toBase58(),
+          });
+        } else {
+          if (orderId === undefined) return { success: false, error: err('  Order ID required. Usage: cancel SOL long 1') };
+          buildResult = await this.api.buildCancelTriggerOrder({
+            marketSymbol: market, side: resolvedSide, orderId, isStopLoss: command.params.isStopLoss ?? false, owner: this.wallet.publicKey!.toBase58(),
+          });
+        }
+
+        if (buildResult['err']) return { success: false, error: err(`  ${buildResult['err']}`) };
+        const txBase64 = buildResult['transactionBase64'] as string;
+        if (!txBase64) return { success: false, error: err('  API returned no transaction') };
+
+        const txResult = await this.txPipeline.execute(txBase64, this.wallet.keypair, `cancel:${market}:${orderId ?? 'all'}`);
+        if (!txResult.success) return { success: false, error: err(`  ${txResult.error}`) };
+
+        audit.log({ timestamp: new Date().toISOString(), action: 'cancel_order', market, txHash: txResult.signature, status: 'confirmed' });
+        return { success: true, signature: txResult.signature, error: `\n  ${chalk.green('✓')} Order cancelled: ${txResult.signature?.slice(0, 16)}...\n` };
+      } catch (e) {
+        return { success: false, error: err(`  ${e instanceof Error ? e.message : String(e)}`) };
+      }
+    }
+
+    // TP / SL
+    if (command.action === Action.TakeProfit || command.action === Action.StopLoss) {
+      if (!market || !triggerPrice) {
+        return { success: false, error: err('  Usage: set tp SOL 200  OR  set sl SOL 170') };
+      }
+
+      const position = await this.state.getPosition(market, side);
+      if (!position) return { success: false, error: err(`  No open ${market} position found`) };
+
+      const isStopLoss = command.action === Action.StopLoss;
+      const label = isStopLoss ? 'Stop Loss' : 'Take Profit';
+
+      const lines = [
+        '',
+        `  ${accentBold(label.toUpperCase())}`,
+        `  ${dim('─'.repeat(48))}`,
+        '',
+        `  ${dim('Market:')}   ${chalk.white.bold(market)} ${colorSide(position.side)}`,
+        `  ${dim('Trigger:')}  ${chalk.white.bold(formatPrice(triggerPrice))}`,
+        `  ${dim('Size:')}     ${formatUsd(position.sizeUsd)}`,
+        `  ${dim('Entry:')}    ${formatPrice(position.entryPrice)}`,
+        `  ${dim('─'.repeat(48))}`,
+      ];
+
+      if (this.config.simulationMode) {
+        lines.push(`  ${dim('[SIMULATION MODE]')}`, '');
+        return { success: true, error: lines.join('\n') };
+      }
+
+      if (!this.wallet.isConnected || !this.wallet.keypair) {
+        return { success: false, error: err('  Wallet not connected') };
+      }
+
+      try {
+        log.info('ENGINE', `Setting ${label}: ${market} @ ${triggerPrice}`);
+        const buildResult = await this.api.buildPlaceTriggerOrder({
+          marketSymbol: market,
+          side: position.side,
+          triggerPrice,
+          sizeAmount: position.sizeUsd,
+          isStopLoss,
+          owner: this.wallet.publicKey!.toBase58(),
+        });
+
+        if (buildResult['err']) return { success: false, error: err(`  Build failed: ${buildResult['err']}`) };
+        const txBase64 = buildResult['transactionBase64'] as string;
+        if (!txBase64) return { success: false, error: err('  API returned no transaction') };
+
+        const txResult = await this.txPipeline.execute(txBase64, this.wallet.keypair, `${isStopLoss ? 'sl' : 'tp'}:${market}:${triggerPrice}`);
+        if (!txResult.success) {
+          lines.push('', `  ${err(txResult.error ?? 'Failed')}`, '');
+          return { success: false, error: lines.join('\n') };
+        }
+
+        lines.push('', `  ${chalk.green('✓')} ${label} set: ${txResult.signature?.slice(0, 16)}...`, '');
+        audit.log({ timestamp: new Date().toISOString(), action: isStopLoss ? 'stop_loss' : 'take_profit', market, side: position.side, txHash: txResult.signature, status: 'confirmed' });
+        return { success: true, signature: txResult.signature, error: lines.join('\n') };
+      } catch (e) {
+        return { success: false, error: err(`  ${e instanceof Error ? e.message : String(e)}`) };
+      }
+    }
+
+    // Limit order
+    if (command.action === Action.LimitOrder) {
+      return { success: true, error: dim('  Limit orders — coming soon (requires backup oracle instruction)') };
+    }
+
+    return { success: false, error: err(`  Unknown order action: ${command.action}`) };
   }
 
-  // Swap removed — not supported via API (InvalidWhitelistAccount 6069).
-  // Use flash.trade website for swaps.
-  // Swap removed — not supported via API.
+  // ─── LP Handler (NOT SUPPORTED — requires SDK) ────────────────────────
 
-  // ─── LP Handler ───────────────────────────────────────────────────────
-
-  private async handleLp(command: ParsedCommand): Promise<TxResult> {
-    return { success: true, error: dim(`  LP (${command.action}) — Phase 4`) };
+  private async handleLp(_command: ParsedCommand): Promise<TxResult> {
+    return { success: false, error: '  LP operations require SDK. Use flash.trade website for LP.' };
   }
 
   // ─── View Handlers ────────────────────────────────────────────────────

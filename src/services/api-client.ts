@@ -169,4 +169,72 @@ export class FlashApiClient implements IApiClient {
     return this.post<unknown>('/transaction-builder/reverse-position', params);
   }
 
+  // ─── Trigger Orders (TP/SL) ─────────────────────────────────────────
+
+  async buildPlaceTriggerOrder(params: {
+    marketSymbol: string;
+    side: string;
+    triggerPrice: number;
+    sizeAmount: number;
+    isStopLoss: boolean;
+    owner: string;
+  }): Promise<Record<string, unknown>> {
+    return this.post<Record<string, unknown>>('/transaction-builder/place-trigger-order', {
+      market_symbol: params.marketSymbol,
+      side: params.side,
+      trigger_price: params.triggerPrice,
+      size_amount: params.sizeAmount,
+      is_stop_loss: params.isStopLoss,
+      owner: params.owner,
+    });
+  }
+
+  async buildCancelTriggerOrder(params: {
+    marketSymbol: string;
+    side: string;
+    orderId: number;
+    isStopLoss: boolean;
+    owner: string;
+  }): Promise<Record<string, unknown>> {
+    return this.post<Record<string, unknown>>('/transaction-builder/cancel-trigger-order', {
+      market_symbol: params.marketSymbol,
+      side: params.side,
+      order_id: params.orderId,
+      is_stop_loss: params.isStopLoss,
+      owner: params.owner,
+    });
+  }
+
+  async buildCancelAllTriggerOrders(params: {
+    marketSymbol: string;
+    side: string;
+    owner: string;
+  }): Promise<Record<string, unknown>> {
+    return this.post<Record<string, unknown>>('/transaction-builder/cancel-all-trigger-orders', {
+      market_symbol: params.marketSymbol,
+      side: params.side,
+      owner: params.owner,
+    });
+  }
+
+  // ─── Previews ───────────────────────────────────────────────────────
+
+  async previewTpSl(params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.post<Record<string, unknown>>('/preview/tp-sl', params);
+  }
+
+  async previewExitFee(params: { positionKey: string; closeAmountUsd: number }): Promise<Record<string, unknown>> {
+    return this.post<Record<string, unknown>>('/preview/exit-fee', {
+      position_key: params.positionKey,
+      close_amount_usd_ui: String(params.closeAmountUsd),
+    });
+  }
+
+  async previewMargin(params: { positionKey: string; marginDeltaUsd: number; action: 'ADD' | 'REMOVE' }): Promise<Record<string, unknown>> {
+    return this.post<Record<string, unknown>>('/preview/margin', {
+      position_key: params.positionKey,
+      margin_delta_usd_ui: String(params.marginDeltaUsd),
+      action: params.action,
+    });
+  }
 }
