@@ -385,6 +385,8 @@ const viewPatterns: PatternMatcher[] = [
     if (/^(?:earn|rewards?|staking)$/i.test(input)) return cmd(Action.ViewEarn, flags, raw);
     if (/^(?:tokens?|holdings|assets)$/i.test(input)) return cmd(Action.ViewTokens, flags, raw);
     if (/^(?:allocation|alloc)$/i.test(input)) return cmd(Action.ViewAllocation, flags, raw);
+    if (/^(?:dashboard|dash|overview)$/i.test(input)) return cmd(Action.ViewDashboard, flags, raw);
+    if (/^(?:wallet\s+tokens?|holdings|assets|wallet\s+balance)$/i.test(input)) return cmd(Action.ViewWalletTokens, flags, raw);
     return null;
   },
 

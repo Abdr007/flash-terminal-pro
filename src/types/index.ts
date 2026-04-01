@@ -63,6 +63,8 @@ export enum Action {
   ViewTokens = 'view_tokens',
   ViewToken = 'view_token',
   ViewAllocation = 'view_allocation',
+  ViewDashboard = 'view_dashboard',
+  ViewWalletTokens = 'view_wallet_tokens',
 
   // Wallet
   WalletCreate = 'wallet_create',

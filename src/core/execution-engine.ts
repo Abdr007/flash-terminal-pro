@@ -31,6 +31,7 @@ import type { RpcManager } from '../services/rpc-manager.js';
 import { resolvePool } from '../services/pool-resolver.js';
 import { estimateOpenPosition, crossValidateWithEstimate } from '../services/quote-engine.js';
 import { getAuditLog } from '../security/audit-log.js';
+import { renderDashboard, renderWalletTokens } from '../cli/dashboard.js';
 import { StateConsistency } from './state-consistency.js';
 import { getMetrics } from './metrics.js';
 import { ErrorCode } from '../types/errors.js';
@@ -150,6 +151,10 @@ export class ExecutionEngine implements IExecutionEngine {
         return this.handleViewToken(command);
       case Action.ViewAllocation:
         return this.handleViewAllocation();
+      case Action.ViewDashboard:
+        return this.handleDashboard();
+      case Action.ViewWalletTokens:
+        return this.handleWalletTokens();
       case Action.ViewFunding:
       case Action.ViewOI:
       case Action.ViewFees:
@@ -1211,6 +1216,18 @@ export class ExecutionEngine implements IExecutionEngine {
     return { success: true, error: lines.join('\n') };
   }
 
+  // ─── Dashboard ────────────────────────────────────────────────────────
+
+  private async handleDashboard(): Promise<TxResult> {
+    const output = await renderDashboard(this.state, this.api, this.wallet);
+    return { success: true, error: output };
+  }
+
+  private async handleWalletTokens(): Promise<TxResult> {
+    const output = await renderWalletTokens(this.wallet, this.state);
+    return { success: true, error: output };
+  }
+
   // ─── Trade History ────────────────────────────────────────────────────
 
   private handleTradeHistory(): TxResult {
@@ -1387,7 +1404,9 @@ export class ExecutionEngine implements IExecutionEngine {
       `    pool Crypto.1              Pool detail (assets, ratios)`,
       '',
       `  ${chalk.cyan('PORTFOLIO')}`,
+      `    dashboard / dash           Full portfolio overview`,
       `    tokens                     Token holdings`,
+      `    wallet tokens              Full token scan`,
       `    token SOL                  Token detail + position`,
       `    allocation                 Portfolio breakdown`,
       '',
