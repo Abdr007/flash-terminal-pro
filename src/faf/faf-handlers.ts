@@ -42,7 +42,6 @@ export async function handleFafDashboard(sdkService: SdkService | null, wallet: 
     lines.push(`  ${dim('FAF is the Flash Trade governance token.')}`);
     lines.push(`  ${dim('Stake FAF for fee discounts + USDC revenue share.')}`);
     lines.push(divider());
-    lines.push(flowHint('faf tier │ faf rewards │ help'));
     return { success: true, error: lines.join('\n') };
   }
 
@@ -102,7 +101,6 @@ export async function handleFafDashboard(sdkService: SdkService | null, wallet: 
   }
 
   lines.push(divider());
-  lines.push(flowHint('faf stake <amt> │ faf claim │ faf tier │ faf rewards'));
   return { success: true, error: lines.join('\n') };
 }
 
@@ -153,7 +151,6 @@ export async function handleFafUnstake(amount: number, sdkService: SdkService | 
   }
 
   lines.push(divider());
-  lines.push(flowHint('faf requests │ faf │ faf cancel <index>'));
   return { success: true, error: lines.join('\n') };
 }
 
@@ -214,7 +211,6 @@ export async function handleFafTier(sdkService: SdkService | null, wallet: Walle
   }
 
   lines.push(divider());
-  lines.push(flowHint('faf stake <amt> │ faf │ faf rewards'));
   return { success: true, error: lines.join('\n') };
 }
 
@@ -235,7 +231,6 @@ export async function handleFafRewards(sdkService: SdkService | null, wallet: Wa
   if (!stake) {
     lines.push(`  ${dim('No FAF staked. Stake FAF to earn rewards.')}`);
     lines.push(divider());
-    lines.push(flowHint('faf stake <amt> │ faf tier'));
     return { success: true, error: lines.join('\n') };
   }
 
@@ -250,7 +245,6 @@ export async function handleFafRewards(sdkService: SdkService | null, wallet: Wa
   }
 
   lines.push(divider());
-  lines.push(flowHint('faf claim │ faf │ faf tier'));
   return { success: true, error: lines.join('\n') };
 }
 
@@ -270,7 +264,6 @@ export async function handleFafReferral(sdkService: SdkService | null, wallet: W
   lines.push(`  ${dim('Higher VIP tier = higher rebate percentage.')}`);
 
   lines.push(divider());
-  lines.push(flowHint('faf tier │ faf rewards │ faf'));
   return { success: true, error: lines.join('\n') };
 }
 
@@ -352,7 +345,6 @@ export async function handleFafRequests(sdkService: SdkService | null, wallet: W
   }
 
   lines.push(divider());
-  lines.push(flowHint('faf cancel <index> │ faf │ faf claim'));
   return { success: true, error: lines.join('\n') };
 }
 
@@ -396,7 +388,6 @@ export async function handleFafCancel(
   // SDK cancel: cancelUnstakeTokenRequest
   lines.push(`  ${dim('Cancel transaction requires SDK. Use flash.trade website.')}`);
   lines.push(divider());
-  lines.push(flowHint('faf requests │ faf'));
   return { success: true, error: lines.join('\n') };
 }
 
@@ -409,6 +400,3 @@ function tierBadge(level: number, name: string): string {
   return chalk.green.bold(name);
 }
 
-function flowHint(next: string): string {
-  return `\n  ${dim('Next:')} ${next}\n`;
-}

@@ -38,9 +38,6 @@ function apyColor(apy: number): string {
   return dim(str);
 }
 
-function flowHint(next: string): string {
-  return `\n  ${dim('Next:')} ${next}\n`;
-}
 
 // ─── 1. earn (pool overview) ────────────────────────────────────────────────
 
@@ -79,7 +76,6 @@ export async function handleEarnOverview(api: FlashApiClient): Promise<TxResult>
   lines.push('');
   lines.push(`  ${chalk.green('FLP')} = auto-compound  ${chalk.cyan('sFLP')} = USDC hourly rewards`);
   lines.push(divider());
-  lines.push(flowHint('earn info <pool> │ earn best │ earn simulate $1000 crypto │ earn dashboard'));
   return { success: true, error: lines.join('\n') };
 }
 
@@ -115,7 +111,6 @@ export async function handleEarnInfo(poolAlias: string, api: FlashApiClient): Pr
   }
 
   lines.push(divider());
-  lines.push(flowHint(`earn deposit $100 ${pool.aliases[0]} │ earn simulate $1000 ${pool.aliases[0]} │ earn best`));
   return { success: true, error: lines.join('\n') };
 }
 
@@ -145,7 +140,6 @@ export async function handleEarnBest(api: FlashApiClient): Promise<TxResult> {
   }
 
   lines.push(divider());
-  lines.push(flowHint('earn info <pool> │ earn simulate $<amt> <pool> │ earn deposit $<amt> <pool>'));
   return { success: true, error: lines.join('\n') };
 }
 
@@ -194,7 +188,6 @@ export async function handleEarnSimulate(amount: number, poolAlias: string, api:
   lines.push('');
   lines.push(warning('APY is estimated. Past performance does not guarantee future results.'));
   lines.push(divider());
-  lines.push(flowHint(`earn deposit $${amount} ${pool.aliases[0]} │ earn best │ earn info ${pool.aliases[0]}`));
   return { success: true, error: lines.join('\n') };
 }
 
@@ -233,7 +226,6 @@ export async function handleEarnDemand(api: FlashApiClient): Promise<TxResult> {
   lines.push('');
   lines.push(`  ${chalk.green('>>> ENTER')} = high APY + low TVL = best LP opportunity`);
   lines.push(divider());
-  lines.push(flowHint('earn best │ earn simulate $1000 <pool> │ earn deposit $<amt> <pool>'));
   return { success: true, error: lines.join('\n') };
 }
 
@@ -275,7 +267,6 @@ export async function handleEarnRotate(api: FlashApiClient): Promise<TxResult> {
   lines.push(`  ${dim('Command:')} earn deposit $<amount> ${best.pool.aliases[0]}`);
 
   lines.push(divider());
-  lines.push(flowHint(`earn deposit $100 ${best.pool.aliases[0]} │ earn simulate $1000 ${best.pool.aliases[0]} │ earn best`));
   return { success: true, error: lines.join('\n') };
 }
 
@@ -317,7 +308,6 @@ export async function handleEarnDashboard(api: FlashApiClient): Promise<TxResult
   }
 
   lines.push(divider());
-  lines.push(flowHint('earn best │ earn simulate $1000 crypto │ earn demand │ earn pnl'));
   return { success: true, error: lines.join('\n') };
 }
 
@@ -357,7 +347,6 @@ export async function handleEarnPnl(): Promise<TxResult> {
   }
 
   lines.push(divider());
-  lines.push(flowHint('earn dashboard │ earn positions │ earn history'));
   return { success: true, error: lines.join('\n') };
 }
 
@@ -375,7 +364,6 @@ export async function handleEarnPositions(): Promise<TxResult> {
   lines.push(`  ${dim('Use "wallet tokens" to see all token holdings.')}`);
 
   lines.push(divider());
-  lines.push(flowHint('wallet tokens │ earn pnl │ earn dashboard'));
   return { success: true, error: lines.join('\n') };
 }
 
@@ -390,7 +378,6 @@ export async function handleEarnHistory(poolAlias?: string): Promise<TxResult> {
   if (journal.length === 0) {
     lines.push(`  ${dim('No earn transactions recorded.')}`);
     lines.push(divider());
-    lines.push(flowHint('earn deposit $100 crypto │ earn │ dashboard'));
     return { success: true, error: lines.join('\n') };
   }
 
@@ -410,24 +397,15 @@ export async function handleEarnHistory(poolAlias?: string): Promise<TxResult> {
   }
 
   lines.push(divider());
-  lines.push(flowHint('earn pnl │ earn dashboard │ earn positions'));
   return { success: true, error: lines.join('\n') };
 }
 
 // ─── 11-16. Execution commands ──────────────────────────────────────────────
 
+// Earn execution is handled by ExecutionEngine.handleLp() which calls SdkService
 export function handleEarnExecution(action: string): TxResult {
   return {
     success: false,
-    error: [
-      '',
-      `  ${chalk.yellow('Earn ' + action + ' requires on-chain transaction.')}`,
-      '',
-      `  ${dim('This operation uses the Flash SDK (isolated service).')}`,
-      `  ${dim('Ensure wallet is connected in Live mode.')}`,
-      '',
-      `  ${dim('Alternative: use')} ${chalk.white('flash.trade')} ${dim('website.')}`,
-      '',
-    ].join('\n'),
+    error: `  Earn ${action} — connect wallet in Live mode to execute.`,
   };
 }

@@ -36,11 +36,11 @@ import { renderPnl, renderExposure, renderRisk } from '../cli/analytics.js';
 import {
   handleEarnOverview, handleEarnInfo, handleEarnBest, handleEarnSimulate,
   handleEarnDemand, handleEarnRotate, handleEarnDashboard as earnDash,
-  handleEarnPnl, handleEarnPositions, handleEarnHistory, handleEarnExecution,
+  handleEarnPnl, handleEarnPositions, handleEarnHistory,
 } from '../earn/earn-handlers.js';
 import type { SdkService } from '../services/sdk-service.js';
 import {
-  handleFafDashboard, handleFafStake, handleFafUnstake, handleFafClaim,
+  handleFafDashboard,
   handleFafTier, handleFafRewards, handleFafReferral, handleFafPoints,
   handleFafRequests,
 } from '../faf/faf-handlers.js';
@@ -316,11 +316,11 @@ export class ExecutionEngine implements IExecutionEngine {
         }
         return handleFafRequests(this.sdkService, this.wallet);
       case Action.FafStake:
-        return handleFafStake(command.params.amount ?? 0, this.sdkService, this.wallet);
+        return this.executeFafAction('stake', command.params.amount ?? 0);
       case Action.FafUnstake:
-        return handleFafUnstake(command.params.amount ?? 0, this.sdkService, this.wallet);
+        return this.executeFafAction('unstake', command.params.amount ?? 0);
       case Action.FafClaim:
-        return handleFafClaim(this.sdkService, this.wallet);
+        return this.executeFafAction('claim', 0);
 
       // ─── Analytics ──────────────────────────────────────────────────
       case Action.Analyze:
@@ -355,11 +355,14 @@ export class ExecutionEngine implements IExecutionEngine {
       case Action.EarnHistory:
         return handleEarnHistory(command.params.pool);
       case Action.EarnDeposit:
-      case Action.EarnWithdraw:
       case Action.EarnStake:
+        // Route deposit/stake to LP handler (SDK builds, TxPipeline sends)
+        return this.handleLp({ ...command, action: Action.AddLiquidity });
+      case Action.EarnWithdraw:
       case Action.EarnUnstake:
+        return this.handleLp({ ...command, action: Action.RemoveLiquidity });
       case Action.EarnClaim:
-        return handleEarnExecution(command.action.replace('earn_', ''));
+        return this.executeFafAction('claim', 0); // LP claim uses same SDK path
 
       // ─── Utilities ──────────────────────────────────────────────────
       case Action.RpcStatus:
@@ -1005,17 +1008,26 @@ export class ExecutionEngine implements IExecutionEngine {
   // ─── LP Handler (via SDK Service) ──────────────────────────────────────
 
   private async handleLp(command: ParsedCommand): Promise<TxResult> {
-    const { token, pool, amount } = command.params;
+    const { token, pool: rawPool, amount } = command.params;
     const isDeposit = command.action === Action.AddLiquidity;
 
     if (!this.sdkService) {
-      return { success: false, error: '  LP operations require SDK service. Restart with SDK enabled.' };
+      return { success: false, error: '  LP operations require SDK service.' };
     }
     if (!this.wallet.isConnected || !this.wallet.keypair) {
-      return { success: false, error: err('  Wallet not connected') };
+      return { success: false, error: err('  Wallet not connected. Use Live mode.') };
     }
-    if (!pool || !amount) {
-      return { success: false, error: err(`  Usage: ${isDeposit ? 'deposit 100 USDC into Crypto.1' : 'withdraw 100 USDC from Crypto.1'}`) };
+    if (!rawPool || !amount) {
+      return { success: false, error: err(`  Usage: ${isDeposit ? 'earn deposit $100 crypto' : 'earn withdraw 100% crypto'}`) };
+    }
+
+    // Resolve pool alias (crypto → Crypto.1)
+    const { resolveEarnPool } = await import('../earn/pool-registry.js');
+    const poolInfo = resolveEarnPool(rawPool);
+    const pool = poolInfo?.poolId ?? rawPool;
+
+    if (this.config.simulationMode) {
+      return { success: true, error: dim(`\n  [SIMULATION] Would ${isDeposit ? 'deposit' : 'withdraw'} ${amount} ${token ?? 'USDC'} ${isDeposit ? 'into' : 'from'} ${pool}\n`) };
     }
 
     const log = getLogger();
@@ -1443,6 +1455,66 @@ export class ExecutionEngine implements IExecutionEngine {
 
 
   // ─── Doctor ───────────────────────────────────────────────────────────
+
+  // ─── FAF Execution (SDK → TxPipeline) ──────────────────────────────
+
+  private async executeFafAction(action: string, amount: number): Promise<TxResult> {
+    const log = getLogger();
+    const audit = getAuditLog();
+
+    if (!this.sdkService || !this.wallet.isConnected || !this.wallet.keypair) {
+      return { success: false, error: err('  Connect wallet in Live mode to execute FAF operations.') };
+    }
+
+    if (this.config.simulationMode) {
+      return { success: true, error: dim(`\n  [SIMULATION] Would execute faf ${action}${amount > 0 ? ' ' + amount : ''}\n`) };
+    }
+
+    log.info('ENGINE', `FAF ${action}: ${amount > 0 ? amount : 'claim'}`);
+    const startMs = Date.now();
+
+    // Build transaction via SDK
+    let result: { transactionBase64: string } | null = null;
+    try {
+      if (action === 'stake') {
+        result = await this.sdkService.buildFafStake(this.wallet.keypair, amount);
+      } else if (action === 'unstake') {
+        result = await this.sdkService.buildFafUnstake(this.wallet.keypair, amount);
+      } else if (action === 'claim') {
+        result = await this.sdkService.buildFafClaim(this.wallet.keypair);
+      }
+    } catch (e) {
+      return { success: false, error: err(`  FAF ${action} build failed: ${e instanceof Error ? e.message : String(e)}`) };
+    }
+
+    if (!result || !result.transactionBase64) {
+      return { success: false, error: err(`  Could not build FAF ${action} transaction.`) };
+    }
+
+    // Send through TxPipeline (same as perps)
+    const tradeKey = `faf:${action}:${amount}`;
+    const txResult = await this.txPipeline.execute(result.transactionBase64, this.wallet.keypair, tradeKey);
+    const durationMs = Date.now() - startMs;
+
+    if (!txResult.success) {
+      audit.log({ timestamp: new Date().toISOString(), action: `faf_${action}`, status: 'failed', error: txResult.error, durationMs });
+      return { success: false, error: err(`  FAF ${action} failed: ${txResult.error}`) };
+    }
+
+    audit.log({ timestamp: new Date().toISOString(), action: `faf_${action}`, txHash: txResult.signature, status: 'confirmed', durationMs });
+
+    return {
+      success: true,
+      signature: txResult.signature,
+      error: [
+        '',
+        `  ${chalk.green('✓')} FAF ${action} confirmed: ${txResult.signature?.slice(0, 16)}...`,
+        `  ${dim(`Duration: ${durationMs}ms`)}`,
+        `  ${dim(`https://solscan.io/tx/${txResult.signature}`)}`,
+        '',
+      ].join('\n'),
+    };
+  }
 
   private async handleCloseAll(): Promise<TxResult> {
     const positions = await this.state.getPositions();
