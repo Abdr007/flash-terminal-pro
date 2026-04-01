@@ -374,6 +374,75 @@ export class SdkService {
   }
 
   /**
+   * Build earn withdraw by percentage — matching flash-terminal's unstakeFLP.
+   * Reads staked balance from FlpStakeAccount PDA, calculates amount from %.
+   * Multi-step: unstake → withdraw → removeLiquidity
+   */
+  async buildEarnWithdrawPercent(
+    keypair: Keypair,
+    percent: number,
+    poolName: string,
+  ): Promise<SdkTxResult | null> {
+    this.init(keypair);
+    if (!this.client || !this.connection) return null;
+
+    const log = getLogger();
+    const pc = this.poolConfigs.get(poolName);
+    if (!pc) { log.error('SDK', `Pool ${poolName} not found`); return null; }
+
+    try {
+      const { PublicKey } = await import('@solana/web3.js');
+      const { BN } = await import('@coral-xyz/anchor');
+
+      // Read staked balance from FlpStakeAccount PDA
+      const [flpStakePda] = PublicKey.findProgramAddressSync(
+        [Buffer.from('stake'), keypair.publicKey.toBuffer(), pc.poolAddress.toBuffer()],
+        pc.programId,
+      );
+      const stakeAccountInfo = await this.connection.getAccountInfo(flpStakePda);
+      if (!stakeAccountInfo) {
+        log.error('SDK', 'No staked FLP position found');
+        return null;
+      }
+
+      const decoded = this.client.program.coder.accounts.decode('flpStake', stakeAccountInfo.data) as {
+        stakeStats: { activeAmount: typeof BN.prototype; pendingActivation: typeof BN.prototype; deactivatedAmount: typeof BN.prototype };
+      };
+      const activeAmount = decoded.stakeStats.activeAmount;
+      const pendingActivation = decoded.stakeStats.pendingActivation;
+      const totalStaked = activeAmount.add(pendingActivation);
+
+      if (totalStaked.isZero()) {
+        log.error('SDK', 'No staked FLP to withdraw');
+        return null;
+      }
+
+      // Calculate unstake amount from percentage
+      const unstakeAmount = totalStaked.mul(new BN(Math.floor(percent))).div(new BN(100));
+      log.info('SDK', `Withdraw ${percent}%: ${unstakeAmount.toString()} of ${totalStaked.toString()} staked`);
+
+      // Step 1: Unstake instant
+      const unstakeResult = await this.client.unstakeInstant(
+        'USDC',
+        unstakeAmount,
+        pc,
+      );
+
+      // Step 2: Withdraw stake
+      const withdrawResult = await this.client.withdrawStake(pc, false, true, true);
+
+      // Combine into single tx: unstake + withdraw
+      const combinedIxs = [...unstakeResult.instructions, ...withdrawResult.instructions];
+      const combinedSigners = [...unstakeResult.additionalSigners, ...withdrawResult.additionalSigners];
+
+      return this.buildTx(combinedIxs, combinedSigners, keypair, pc);
+    } catch (e) {
+      log.error('SDK', `Earn withdraw failed: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
+  }
+
+  /**
    * Build LP remove liquidity transaction.
    */
   async buildLpWithdraw(

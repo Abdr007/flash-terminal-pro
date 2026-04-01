@@ -1637,6 +1637,7 @@ export class ExecutionEngine implements IExecutionEngine {
     }
 
     const amount = command.params.amount ?? 0;
+    const percent = command.params.percent ?? 0;
     const rawPool = command.params.pool ?? 'crypto';
 
     // Resolve pool alias (crypto → Crypto.1)
@@ -1645,11 +1646,12 @@ export class ExecutionEngine implements IExecutionEngine {
     const pool = poolInfo?.poolId ?? rawPool;
 
     if (this.config.simulationMode) {
-      return { success: true, error: dim(`\n  [SIMULATION] Would ${action} ${amount > 0 ? formatUsd(amount) + ' ' : ''}${action === 'claim' ? 'rewards from' : action === 'deposit' ? 'USDC into' : action === 'stake' ? 'USDC into' : 'from'} ${pool}\n`) };
+      const amtStr = percent > 0 ? `${percent}%` : amount > 0 ? formatUsd(amount) : '';
+      return { success: true, error: dim(`\n  [SIMULATION] Would ${action} ${amtStr} ${action === 'claim' ? 'rewards from' : action === 'deposit' ? 'USDC into' : action === 'stake' ? 'USDC into' : 'from'} ${pool}\n`) };
     }
 
-    if (action !== 'claim' && (!amount || amount <= 0)) {
-      return { success: false, error: err(`  Usage: earn ${action} $100 crypto`) };
+    if (action !== 'claim' && amount <= 0 && percent <= 0) {
+      return { success: false, error: err(`  Usage: earn ${action} ${action === 'withdraw' ? '100% crypto' : '$100 crypto'}`) };
     }
 
     log.info('ENGINE', `Earn ${action}: ${amount > 0 ? formatUsd(amount) : 'claim'} → ${pool}`);
@@ -1664,7 +1666,11 @@ export class ExecutionEngine implements IExecutionEngine {
       } else if (action === 'stake') {
         result = await this.sdkService.buildLpDeposit(keypair, 'USDC', amount, pool);
       } else if (action === 'withdraw') {
-        result = await this.sdkService.buildLpWithdraw(keypair, 'USDC', amount, pool);
+        if (percent > 0) {
+          result = await this.sdkService.buildEarnWithdrawPercent(keypair, percent, pool);
+        } else {
+          result = await this.sdkService.buildLpWithdraw(keypair, 'USDC', amount, pool);
+        }
       } else if (action === 'claim') {
         result = await this.sdkService.buildEarnClaim(keypair, pool);
       }
@@ -1709,7 +1715,7 @@ export class ExecutionEngine implements IExecutionEngine {
       lines.push(`  Staked              ${formatUsd(amount)} USDC`);
       lines.push(`  Received            sFLP (USDC rewards)`);
     } else if (action === 'withdraw') {
-      lines.push(`  Withdrawn           ${formatUsd(amount)}`);
+      lines.push(`  Withdrawn           ${percent > 0 ? percent + '% of FLP' : formatUsd(amount)}`);
       lines.push(`  Received            USDC`);
     } else {
       lines.push(`  Received            USDC rewards`);
