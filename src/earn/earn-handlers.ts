@@ -400,12 +400,4 @@ export async function handleEarnHistory(poolAlias?: string): Promise<TxResult> {
   return { success: true, error: lines.join('\n') };
 }
 
-// ─── 11-16. Execution commands ──────────────────────────────────────────────
-
-// Earn execution is handled by ExecutionEngine.handleLp() which calls SdkService
-export function handleEarnExecution(action: string): TxResult {
-  return {
-    success: false,
-    error: `  Earn ${action} — connect wallet in Live mode to execute.`,
-  };
-}
+// Earn execution is handled by ExecutionEngine.executeEarnAction() which calls SdkService

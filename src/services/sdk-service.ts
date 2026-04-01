@@ -190,6 +190,145 @@ export class SdkService {
     }
   }
 
+  /**
+   * Build FAF claim USDC revenue transaction.
+   * Flash-terminal calls collectRevenue separately from collectTokenReward.
+   */
+  async buildFafClaimRevenue(
+    keypair: Keypair,
+    poolName = 'Crypto.1',
+  ): Promise<SdkTxResult | null> {
+    this.init(keypair);
+    if (!this.client || !this.connection) return null;
+
+    const log = getLogger();
+    const pc = this.poolConfigs.get(poolName);
+    if (!pc) return null;
+
+    try {
+      log.info('SDK', 'Building FAF revenue claim');
+      const result = await this.client.collectRevenue(keypair.publicKey, 'USDC', pc);
+      return this.buildTx(result.instructions, result.additionalSigners, keypair, pc);
+    } catch (e) {
+      log.warn('SDK', `FAF revenue claim: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Build FAF referral rebate claim transaction.
+   */
+  async buildFafClaimRebate(
+    keypair: Keypair,
+    poolName = 'Crypto.1',
+  ): Promise<SdkTxResult | null> {
+    this.init(keypair);
+    if (!this.client || !this.connection) return null;
+
+    const log = getLogger();
+    const pc = this.poolConfigs.get(poolName);
+    if (!pc) return null;
+
+    try {
+      log.info('SDK', 'Building FAF rebate claim');
+      const result = await this.client.collectRebate(keypair.publicKey, 'USDC', pc);
+      return this.buildTx(result.instructions, result.additionalSigners, keypair, pc);
+    } catch (e) {
+      log.warn('SDK', `FAF rebate claim: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Build FAF cancel unstake request transaction.
+   */
+  async buildFafCancel(
+    keypair: Keypair,
+    requestIndex: number,
+    poolName = 'Crypto.1',
+  ): Promise<SdkTxResult | null> {
+    this.init(keypair);
+    if (!this.client || !this.connection) return null;
+
+    const log = getLogger();
+    const pc = this.poolConfigs.get(poolName);
+    if (!pc) return null;
+
+    try {
+      log.info('SDK', `Building FAF cancel unstake: request #${requestIndex}`);
+      const result = await this.client.cancelUnstakeTokenRequest(
+        keypair.publicKey,
+        requestIndex,
+        pc,
+      );
+      return this.buildTx(result.instructions, result.additionalSigners, keypair, pc);
+    } catch (e) {
+      log.error('SDK', `FAF cancel failed: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
+  }
+
+  // ─── Earn Operations (matching flash-terminal's exact SDK methods) ────
+
+  /**
+   * Build earn deposit (compounding liquidity) — USDC → FLP
+   * Flash-terminal uses addCompoundingLiquidity
+   */
+  async buildEarnDeposit(
+    keypair: Keypair,
+    amount: number,
+    poolName: string,
+  ): Promise<SdkTxResult | null> {
+    this.init(keypair);
+    if (!this.client || !this.connection) return null;
+
+    const log = getLogger();
+    const pc = this.poolConfigs.get(poolName);
+    if (!pc) { log.error('SDK', `Pool ${poolName} not found`); return null; }
+
+    try {
+      log.info('SDK', `Building earn deposit: ${amount} USDC → ${poolName}`);
+      const nativeAmount = uiDecimalsToNative(amount.toString(), 6); // USDC = 6 decimals
+      const rewardTokenMint = pc.compoundingTokenMint;
+      const result = await this.client.addCompoundingLiquidity(
+        nativeAmount,
+        BN_ZERO, // minCompoundingAmountOut
+        'USDC',
+        rewardTokenMint,
+        pc,
+      );
+      return this.buildTx(result.instructions, result.additionalSigners, keypair, pc);
+    } catch (e) {
+      log.error('SDK', `Earn deposit failed: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Build earn claim rewards (sFLP staking rewards)
+   * Flash-terminal uses collectStakeFees
+   */
+  async buildEarnClaim(
+    keypair: Keypair,
+    poolName = 'Crypto.1',
+  ): Promise<SdkTxResult | null> {
+    this.init(keypair);
+    if (!this.client || !this.connection) return null;
+
+    const log = getLogger();
+    const pc = this.poolConfigs.get(poolName);
+    if (!pc) return null;
+
+    try {
+      log.info('SDK', `Building earn claim: ${poolName}`);
+      const result = await this.client.collectStakeFees('USDC', pc);
+      return this.buildTx(result.instructions, result.additionalSigners, keypair, pc);
+    } catch (e) {
+      log.error('SDK', `Earn claim failed: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
+  }
+
   // ─── LP Operations ────────────────────────────────────────────────────
 
   /**

@@ -142,6 +142,15 @@ export class WalletManager {
     getLogger().info('WALLET', 'Disconnected');
   }
 
+  /**
+   * Clear cached balances to force fresh fetch on next query.
+   * Called after successful transactions (matching flash-terminal).
+   */
+  clearBalanceCache(): void {
+    // Balances are fetched fresh each call — no cache to clear currently.
+    // This method exists for API compatibility with flash-terminal.
+  }
+
   // ─── Balance ──────────────────────────────────────────────────────────
 
   async getSolBalance(): Promise<number> {

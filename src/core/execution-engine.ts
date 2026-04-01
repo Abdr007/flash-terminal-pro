@@ -184,9 +184,9 @@ export class ExecutionEngine implements IExecutionEngine {
       case Action.CancelAllOrders:
         return this.handleOrder(command);
 
-      // ─── Swap (not supported via API) ──────────────────────────────
+      // ─── Swap ─────────────────────────────────────────────────────
       case Action.Swap:
-        return { success: false, error: '  Swap not supported in API-only mode. Use flash.trade website.' };
+        return { success: false, error: '  Swap is not available in this terminal. Use Jupiter or flash.trade for token swaps.' };
 
       // ─── LP ─────────────────────────────────────────────────────────
       case Action.AddLiquidity:
@@ -311,8 +311,7 @@ export class ExecutionEngine implements IExecutionEngine {
         return handleFafPoints(this.sdkService, this.wallet);
       case Action.FafRequests:
         if (command.params.orderId !== undefined) {
-          const { handleFafCancel } = await import('../faf/faf-handlers.js');
-          return handleFafCancel(command.params.orderId, this.sdkService, this.wallet);
+          return this.executeFafAction('cancel', command.params.orderId);
         }
         return handleFafRequests(this.sdkService, this.wallet);
       case Action.FafStake:
@@ -355,14 +354,14 @@ export class ExecutionEngine implements IExecutionEngine {
       case Action.EarnHistory:
         return handleEarnHistory(command.params.pool);
       case Action.EarnDeposit:
+        return this.executeEarnAction('deposit', command);
       case Action.EarnStake:
-        // Route deposit/stake to LP handler (SDK builds, TxPipeline sends)
-        return this.handleLp({ ...command, action: Action.AddLiquidity });
+        return this.executeEarnAction('stake', command);
       case Action.EarnWithdraw:
       case Action.EarnUnstake:
-        return this.handleLp({ ...command, action: Action.RemoveLiquidity });
+        return this.executeEarnAction('withdraw', command);
       case Action.EarnClaim:
-        return this.executeFafAction('claim', 0); // LP claim uses same SDK path
+        return this.executeEarnAction('claim', command);
 
       // ─── Utilities ──────────────────────────────────────────────────
       case Action.RpcStatus:
@@ -1470,30 +1469,36 @@ export class ExecutionEngine implements IExecutionEngine {
       return { success: true, error: dim(`\n  [SIMULATION] Would execute faf ${action}${amount > 0 ? ' ' + amount : ''}\n`) };
     }
 
-    log.info('ENGINE', `FAF ${action}: ${amount > 0 ? amount : 'claim'}`);
+    log.info('ENGINE', `FAF ${action}: ${amount > 0 ? amount : 'all'}`);
     const startMs = Date.now();
+    const keypair = this.wallet.keypair;
 
-    // Build transaction via SDK
+    // ── Claim is 3-part: FAF rewards + USDC revenue + referral rebates ──
+    if (action === 'claim') {
+      return this.executeFafClaim(keypair, startMs);
+    }
+
+    // ── Build single transaction via SDK ────────────────────────────────
     let result: { transactionBase64: string } | null = null;
     try {
       if (action === 'stake') {
-        result = await this.sdkService.buildFafStake(this.wallet.keypair, amount);
+        result = await this.sdkService.buildFafStake(keypair, amount);
       } else if (action === 'unstake') {
-        result = await this.sdkService.buildFafUnstake(this.wallet.keypair, amount);
-      } else if (action === 'claim') {
-        result = await this.sdkService.buildFafClaim(this.wallet.keypair);
+        result = await this.sdkService.buildFafUnstake(keypair, amount);
+      } else if (action === 'cancel') {
+        result = await this.sdkService.buildFafCancel(keypair, amount);
       }
     } catch (e) {
-      return { success: false, error: err(`  FAF ${action} build failed: ${e instanceof Error ? e.message : String(e)}`) };
+      return { success: false, error: err(`  FAF ${action} failed: ${e instanceof Error ? e.message : String(e)}`) };
     }
 
-    if (!result || !result.transactionBase64) {
+    if (!result?.transactionBase64) {
       return { success: false, error: err(`  Could not build FAF ${action} transaction.`) };
     }
 
-    // Send through TxPipeline (same as perps)
+    // ── Send through TxPipeline ────────────────────────────────────────
     const tradeKey = `faf:${action}:${amount}`;
-    const txResult = await this.txPipeline.execute(result.transactionBase64, this.wallet.keypair, tradeKey);
+    const txResult = await this.txPipeline.execute(result.transactionBase64, keypair, tradeKey);
     const durationMs = Date.now() - startMs;
 
     if (!txResult.success) {
@@ -1501,19 +1506,221 @@ export class ExecutionEngine implements IExecutionEngine {
       return { success: false, error: err(`  FAF ${action} failed: ${txResult.error}`) };
     }
 
+    // ── State refresh ──────────────────────────────────────────────────
+    this.wallet.clearBalanceCache?.();
     audit.log({ timestamp: new Date().toISOString(), action: `faf_${action}`, txHash: txResult.signature, status: 'confirmed', durationMs });
+
+    // ── Success output (matching flash-terminal) ───────────────────────
+    const actionLabel = action === 'stake' ? 'FAF STAKED'
+      : action === 'unstake' ? 'UNSTAKE REQUESTED'
+      : action === 'cancel' ? 'UNSTAKE REQUEST CANCELLED'
+      : `FAF ${action.toUpperCase()}`;
 
     return {
       success: true,
       signature: txResult.signature,
       error: [
         '',
-        `  ${chalk.green('✓')} FAF ${action} confirmed: ${txResult.signature?.slice(0, 16)}...`,
+        `  ${chalk.green('✓')} ${actionLabel}`,
+        '',
+        action === 'stake' ? `  Staked              ${amount} FAF` : '',
+        action === 'unstake' ? `  Unstaking           ${amount} FAF` : '',
+        action === 'unstake' ? `  Unlock              Linear over 90 days` : '',
+        action === 'cancel' ? `  Request #           ${amount}` : '',
+        action === 'cancel' ? `  Tokens returned to staked balance.` : '',
+        '',
+        `  Tx: ${txResult.signature?.slice(0, 16)}...`,
         `  ${dim(`Duration: ${durationMs}ms`)}`,
         `  ${dim(`https://solscan.io/tx/${txResult.signature}`)}`,
         '',
-      ].join('\n'),
+      ].filter(Boolean).join('\n'),
     };
+  }
+
+  /**
+   * FAF claim is 3-part: FAF rewards + USDC revenue + referral rebates
+   * Matching flash-terminal's exact flow: 3 separate TXs
+   */
+  private async executeFafClaim(keypair: import('@solana/web3.js').Keypair, startMs: number): Promise<TxResult> {
+    const log = getLogger();
+    const audit = getAuditLog();
+    const sigs: string[] = [];
+    const claimed: string[] = [];
+
+    // 1. Claim FAF rewards (collectTokenReward)
+    try {
+      const result = await this.sdkService!.buildFafClaim(keypair);
+      if (result?.transactionBase64) {
+        const tx = await this.txPipeline.execute(result.transactionBase64, keypair, 'faf:claim:rewards');
+        if (tx.success && tx.signature) {
+          sigs.push(tx.signature);
+          claimed.push('FAF rewards');
+          log.info('ENGINE', `FAF rewards claimed: ${tx.signature.slice(0, 16)}`);
+        }
+      }
+    } catch (e) {
+      log.warn('ENGINE', `FAF rewards claim: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // 2. Claim USDC revenue (collectRevenue)
+    try {
+      const result = await this.sdkService!.buildFafClaimRevenue(keypair);
+      if (result?.transactionBase64) {
+        const tx = await this.txPipeline.execute(result.transactionBase64, keypair, 'faf:claim:revenue');
+        if (tx.success && tx.signature) {
+          sigs.push(tx.signature);
+          claimed.push('USDC revenue');
+          log.info('ENGINE', `USDC revenue claimed: ${tx.signature.slice(0, 16)}`);
+        }
+      }
+    } catch (e) {
+      log.warn('ENGINE', `USDC revenue claim: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // 3. Claim referral rebates (collectRebate)
+    try {
+      const result = await this.sdkService!.buildFafClaimRebate(keypair);
+      if (result?.transactionBase64) {
+        const tx = await this.txPipeline.execute(result.transactionBase64, keypair, 'faf:claim:rebate');
+        if (tx.success && tx.signature) {
+          sigs.push(tx.signature);
+          claimed.push('referral rebates');
+          log.info('ENGINE', `Referral rebates claimed: ${tx.signature.slice(0, 16)}`);
+        }
+      }
+    } catch (e) {
+      log.warn('ENGINE', `Referral rebate claim: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    const durationMs = Date.now() - startMs;
+
+    // State refresh
+    this.wallet.clearBalanceCache?.();
+
+    if (sigs.length === 0) {
+      return { success: true, error: dim('\n  No claimable rewards found.\n') };
+    }
+
+    audit.log({ timestamp: new Date().toISOString(), action: 'faf_claim', txHash: sigs[0], status: 'confirmed', durationMs });
+
+    const lines = [
+      '',
+      `  ${chalk.green('✓')} REWARDS CLAIMED`,
+      '',
+      `  Claimed             ${claimed.join(', ')}`,
+      '',
+    ];
+    for (const sig of sigs) {
+      lines.push(`  Tx: ${sig.slice(0, 16)}...`);
+    }
+    lines.push(`  ${dim(`Duration: ${durationMs}ms`)}`);
+    if (sigs[0]) lines.push(`  ${dim(`https://solscan.io/tx/${sigs[0]}`)}`);
+    lines.push('');
+
+    return { success: true, signature: sigs[0], error: lines.join('\n') };
+  }
+
+  /**
+   * Earn execution — deposit, stake, withdraw, claim
+   * Matches flash-terminal's exact SDK methods:
+   *   deposit  → addCompoundingLiquidity (USDC → FLP auto-compound)
+   *   stake    → addLiquidityAndStake (USDC → sFLP staked)
+   *   withdraw → removeLiquidity (FLP/sFLP → USDC)
+   *   claim    → collectStakeFees (sFLP rewards)
+   */
+  private async executeEarnAction(action: string, command: ParsedCommand): Promise<TxResult> {
+    const log = getLogger();
+    const audit = getAuditLog();
+
+    if (!this.sdkService || !this.wallet.isConnected || !this.wallet.keypair) {
+      return { success: false, error: err('  Connect wallet in Live mode to execute earn operations.') };
+    }
+
+    const amount = command.params.amount ?? 0;
+    const rawPool = command.params.pool ?? 'crypto';
+
+    // Resolve pool alias (crypto → Crypto.1)
+    const { resolveEarnPool } = await import('../earn/pool-registry.js');
+    const poolInfo = resolveEarnPool(rawPool);
+    const pool = poolInfo?.poolId ?? rawPool;
+
+    if (this.config.simulationMode) {
+      return { success: true, error: dim(`\n  [SIMULATION] Would ${action} ${amount > 0 ? formatUsd(amount) + ' ' : ''}${action === 'claim' ? 'rewards from' : action === 'deposit' ? 'USDC into' : action === 'stake' ? 'USDC into' : 'from'} ${pool}\n`) };
+    }
+
+    if (action !== 'claim' && (!amount || amount <= 0)) {
+      return { success: false, error: err(`  Usage: earn ${action} $100 crypto`) };
+    }
+
+    log.info('ENGINE', `Earn ${action}: ${amount > 0 ? formatUsd(amount) : 'claim'} → ${pool}`);
+    const startMs = Date.now();
+    const keypair = this.wallet.keypair;
+
+    // Build transaction via SDK
+    let result: { transactionBase64: string } | null = null;
+    try {
+      if (action === 'deposit') {
+        result = await this.sdkService.buildEarnDeposit(keypair, amount, pool);
+      } else if (action === 'stake') {
+        result = await this.sdkService.buildLpDeposit(keypair, 'USDC', amount, pool);
+      } else if (action === 'withdraw') {
+        result = await this.sdkService.buildLpWithdraw(keypair, 'USDC', amount, pool);
+      } else if (action === 'claim') {
+        result = await this.sdkService.buildEarnClaim(keypair, pool);
+      }
+    } catch (e) {
+      return { success: false, error: err(`  Earn ${action} failed: ${e instanceof Error ? e.message : String(e)}`) };
+    }
+
+    if (!result?.transactionBase64) {
+      return { success: false, error: err(`  Could not build earn ${action} transaction.`) };
+    }
+
+    // Send through TxPipeline
+    const tradeKey = `earn:${action}:${pool}:${amount}`;
+    const txResult = await this.txPipeline.execute(result.transactionBase64, keypair, tradeKey);
+    const durationMs = Date.now() - startMs;
+
+    if (!txResult.success) {
+      audit.log({ timestamp: new Date().toISOString(), action: `earn_${action}`, status: 'failed', error: txResult.error, durationMs });
+      return { success: false, error: err(`  Earn ${action} failed: ${txResult.error}`) };
+    }
+
+    // State refresh
+    this.wallet.clearBalanceCache?.();
+    audit.log({ timestamp: new Date().toISOString(), action: `earn_${action}`, txHash: txResult.signature, status: 'confirmed', durationMs });
+
+    // Success output (matching flash-terminal)
+    const actionLabel = action === 'deposit' ? 'DEPOSIT CONFIRMED'
+      : action === 'stake' ? 'STAKE CONFIRMED'
+      : action === 'withdraw' ? 'WITHDRAW CONFIRMED'
+      : 'REWARDS CLAIMED';
+
+    const lines = [
+      '',
+      `  ${chalk.green('✓')} ${actionLabel}`,
+      '',
+      `  Pool                ${pool}`,
+    ];
+    if (action === 'deposit') {
+      lines.push(`  Deposited           ${formatUsd(amount)} USDC`);
+      lines.push(`  Received            FLP (auto-compound)`);
+    } else if (action === 'stake') {
+      lines.push(`  Staked              ${formatUsd(amount)} USDC`);
+      lines.push(`  Received            sFLP (USDC rewards)`);
+    } else if (action === 'withdraw') {
+      lines.push(`  Withdrawn           ${formatUsd(amount)}`);
+      lines.push(`  Received            USDC`);
+    } else {
+      lines.push(`  Received            USDC rewards`);
+    }
+    lines.push('');
+    lines.push(`  Tx: ${txResult.signature?.slice(0, 16)}...`);
+    lines.push(`  ${dim(`Duration: ${durationMs}ms`)}`);
+    lines.push(`  ${dim(`https://solscan.io/tx/${txResult.signature}`)}`);
+    lines.push('');
+
+    return { success: true, signature: txResult.signature, error: lines.join('\n') };
   }
 
   private async handleCloseAll(): Promise<TxResult> {

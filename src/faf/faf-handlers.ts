@@ -6,8 +6,8 @@
  */
 
 import chalk from 'chalk';
-import { header, divider, kv, kvBold, section, usd, dim, warning, allocBar, tableHeader, tableRow } from '../cli/display.js';
-import { VIP_TIERS, VOLTAGE_TIERS, getNextTier, formatFaf, UNSTAKE_UNLOCK_DAYS } from './faf-registry.js';
+import { header, divider, kv, kvBold, section, usd, dim, allocBar, tableHeader, tableRow } from '../cli/display.js';
+import { VIP_TIERS, VOLTAGE_TIERS, getNextTier, formatFaf } from './faf-registry.js';
 import { getFafStakeInfo, getFafUnstakeRequests, getVoltageInfo, getFafBalance } from './faf-data.js';
 import type { SdkService } from '../services/sdk-service.js';
 import type { WalletManager } from '../wallet/manager.js';
@@ -104,70 +104,8 @@ export async function handleFafDashboard(sdkService: SdkService | null, wallet: 
   return { success: true, error: lines.join('\n') };
 }
 
-// ─── 2. faf stake <amount> ──────────────────────────────────────────────────
-
-export async function handleFafStake(amount: number, sdkService: SdkService | null, wallet: WalletManager): Promise<TxResult> {
-  if (!sdkService || !wallet.isConnected || !wallet.keypair) {
-    return { success: false, error: `  ${chalk.yellow('FAF stake requires wallet in Live mode.')}` };
-  }
-
-  const lines: string[] = [header('FAF STAKE')];
-  lines.push(kv('Amount', chalk.white.bold(formatFaf(amount))));
-  lines.push(kv('Lock Period', dim('No lock — staked FAF can be unstaked anytime')));
-  lines.push(kv('Benefit', dim('Fee discounts + USDC revenue share')));
-
-  const result = await sdkService.buildFafStake(wallet.keypair, amount);
-  if (!result) {
-    lines.push('');
-    lines.push(`  ${chalk.yellow('Could not build stake transaction.')}`);
-    lines.push(`  ${dim('Use flash.trade website for FAF staking.')}`);
-    lines.push(divider());
-    return { success: false, error: lines.join('\n') };
-  }
-
-  lines.push('');
-  lines.push(`  ${dim('Transaction built. Submit via "faf stake" in Live mode.')}`);
-  lines.push(divider());
-  return { success: true, error: lines.join('\n') };
-}
-
-// ─── 3. faf unstake <amount> ────────────────────────────────────────────────
-
-export async function handleFafUnstake(amount: number, sdkService: SdkService | null, wallet: WalletManager): Promise<TxResult> {
-  if (!sdkService || !wallet.isConnected || !wallet.keypair) {
-    return { success: false, error: `  ${chalk.yellow('FAF unstake requires wallet in Live mode.')}` };
-  }
-
-  const lines: string[] = [header('FAF UNSTAKE REQUEST')];
-  lines.push(kv('Amount', chalk.white.bold(formatFaf(amount))));
-  lines.push(kv('Unlock Period', chalk.yellow(`${UNSTAKE_UNLOCK_DAYS} days`)));
-  lines.push(warning(`Your FAF will be locked for ${UNSTAKE_UNLOCK_DAYS} days before withdrawal.`));
-
-  const result = await sdkService.buildFafUnstake(wallet.keypair, amount);
-  if (!result) {
-    lines.push('');
-    lines.push(`  ${chalk.yellow('Could not build unstake transaction.')}`);
-    lines.push(`  ${dim('Use flash.trade website.')}`);
-  }
-
-  lines.push(divider());
-  return { success: true, error: lines.join('\n') };
-}
-
-// ─── 4. faf claim ───────────────────────────────────────────────────────────
-
-export async function handleFafClaim(sdkService: SdkService | null, wallet: WalletManager): Promise<TxResult> {
-  if (!sdkService || !wallet.isConnected || !wallet.keypair) {
-    return { success: false, error: `  ${chalk.yellow('FAF claim requires wallet in Live mode.')}` };
-  }
-
-  const result = await sdkService.buildFafClaim(wallet.keypair);
-  if (!result) {
-    return { success: false, error: `  ${chalk.yellow('Could not build claim transaction. Use flash.trade.')}` };
-  }
-
-  return { success: true, error: `\n  ${chalk.green('Claim transaction ready.')}\n  ${dim('Submit in Live mode.')}\n` };
-}
+// FAF stake/unstake/claim execution is handled by ExecutionEngine.executeFafAction()
+// which builds via SdkService and sends through TxPipeline.
 
 // ─── 5. faf tier ────────────────────────────────────────────────────────────
 
@@ -348,48 +286,8 @@ export async function handleFafRequests(sdkService: SdkService | null, wallet: W
   return { success: true, error: lines.join('\n') };
 }
 
-// ─── 10. faf cancel <index> ─────────────────────────────────────────────────
-
-export async function handleFafCancel(
-  index: number,
-  sdkService: SdkService | null,
-  wallet: WalletManager,
-): Promise<TxResult> {
-  const lines: string[] = [header('CANCEL UNSTAKE REQUEST')];
-
-  lines.push(kv('Request #', chalk.white.bold(String(index))));
-
-  // Validate request exists
-  const ctx = await getStakeContext(sdkService, wallet);
-  if (ctx) {
-    const requests = await getFafUnstakeRequests(ctx.perpClient, ctx.poolConfig, ctx.publicKey);
-    const target = requests.find(r => r.index === index);
-    if (!target) {
-      lines.push('');
-      lines.push(`  ${chalk.red('Request #' + index + ' not found.')}`);
-      lines.push(`  ${dim('Use "faf requests" to see active requests.')}`);
-      lines.push(divider());
-      return { success: false, error: lines.join('\n') };
-    }
-    lines.push(kv('Amount', formatFaf(target.amount)));
-    lines.push(kv('Status', target.isUnlocked ? chalk.green('Unlocked') : chalk.yellow(target.daysRemaining + 'd remaining')));
-  }
-
-  lines.push('');
-  lines.push(`  ${chalk.yellow('Cancel will return FAF to your staked balance.')}`);
-
-  // Try SDK execution
-  if (!sdkService || !wallet.isConnected || !wallet.keypair) {
-    lines.push(`  ${dim('Connect wallet in Live mode to cancel.')}`);
-    lines.push(divider());
-    return { success: true, error: lines.join('\n') };
-  }
-
-  // SDK cancel: cancelUnstakeTokenRequest
-  lines.push(`  ${dim('Cancel transaction requires SDK. Use flash.trade website.')}`);
-  lines.push(divider());
-  return { success: true, error: lines.join('\n') };
-}
+// FAF cancel is handled by ExecutionEngine.executeFafAction('cancel', requestIndex)
+// which calls SdkService.buildFafCancel() and sends through TxPipeline.
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
