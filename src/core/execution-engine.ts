@@ -140,11 +140,12 @@ export class ExecutionEngine implements IExecutionEngine {
       case Action.ViewStats:
         return this.handleStats();
       case Action.ViewOrders:
+        return this.handleViewOrders();
       case Action.ViewFunding:
       case Action.ViewOI:
       case Action.ViewFees:
       case Action.ViewHours:
-        return { success: true, error: dim('  Coming in Phase 2') };
+        return { success: true, error: dim('  Data view coming soon') };
 
       // ─── Wallet ─────────────────────────────────────────────────────
       case Action.WalletCreate:
@@ -386,6 +387,7 @@ export class ExecutionEngine implements IExecutionEngine {
     lines.push('');
     lines.push(`  ${chalk.green('✓')} Trade executed: ${txResult.signature?.slice(0, 16)}...`);
     lines.push(`  ${dim(`Duration: ${durationMs}ms`)}`);
+    lines.push(`  ${dim(`https://solscan.io/tx/${txResult.signature}`)}`);
 
     if (verification.verified) {
       lines.push(`  ${dim(verification.details)}`);
@@ -523,6 +525,7 @@ export class ExecutionEngine implements IExecutionEngine {
     lines.push('');
     lines.push(`  ${chalk.green('✓')} Position closed: ${txResult.signature?.slice(0, 16)}...`);
     lines.push(`  ${dim(`Duration: ${durationMs}ms`)}`);
+    lines.push(`  ${dim(`https://solscan.io/tx/${txResult.signature}`)}`);
     lines.push('');
 
     metrics.recordTradeSuccess(durationMs);
@@ -533,8 +536,62 @@ export class ExecutionEngine implements IExecutionEngine {
   }
 
   private async handleReverse(command: ParsedCommand): Promise<TxResult> {
-    void command;
-    return { success: true, error: dim('  Reverse position — Phase 2') };
+    const log = getLogger();
+    const audit = getAuditLog();
+    const { market, side } = command.params;
+    if (!market) return { success: false, error: err('  Usage: reverse SOL') };
+
+    const position = await this.state.getPosition(market, side);
+    if (!position) return { success: false, error: err(`  No open ${market} position found to reverse`) };
+
+    const lines = [
+      '',
+      `  ${accentBold('REVERSE POSITION')}`,
+      `  ${dim('─'.repeat(48))}`,
+      '',
+      `  ${dim('Market:')}   ${chalk.white.bold(market)} ${colorSide(position.side)} → ${colorSide(position.side === 'LONG' ? 'SHORT' : 'LONG')}`,
+      `  ${dim('Size:')}     ${formatUsd(position.sizeUsd)}`,
+      `  ${dim('Entry:')}    ${formatPrice(position.entryPrice)}`,
+      `  ${dim('─'.repeat(48))}`,
+    ];
+
+    if (this.config.simulationMode) {
+      lines.push(`  ${dim('[SIMULATION MODE]')}`, '');
+      return { success: true, error: lines.join('\n') };
+    }
+
+    if (!this.wallet.isConnected || !this.wallet.keypair) {
+      return { success: false, error: err('  Wallet not connected') };
+    }
+
+    try {
+      log.info('ENGINE', `Reverse: ${market} ${position.side}`);
+      const buildResult = await this.api.buildReversePosition({
+        positionKey: position.pubkey,
+        owner: this.wallet.publicKey!.toBase58(),
+      }) as Record<string, unknown>;
+
+      if (buildResult['err']) return { success: false, error: err(`  ${buildResult['err']}`) };
+      const txBase64 = buildResult['transactionBase64'] as string;
+      if (!txBase64) return { success: false, error: err('  API returned no transaction') };
+
+      const startMs = Date.now();
+      const txResult = await this.txPipeline.execute(txBase64, this.wallet.keypair, `reverse:${market}`);
+      const durationMs = Date.now() - startMs;
+
+      if (!txResult.success) {
+        lines.push('', `  ${err(txResult.error ?? 'Failed')}`, '');
+        return { success: false, error: lines.join('\n') };
+      }
+
+      lines.push('', `  ${chalk.green('✓')} Position reversed: ${txResult.signature?.slice(0, 16)}...`);
+      lines.push(`  ${dim(`Duration: ${durationMs}ms`)}`);
+      lines.push(`  ${dim(`https://solscan.io/tx/${txResult.signature}`)}`, '');
+      audit.log({ timestamp: new Date().toISOString(), action: 'reverse_position', market, side: position.side, txHash: txResult.signature, status: 'confirmed', durationMs });
+      return { success: true, signature: txResult.signature, error: lines.join('\n') };
+    } catch (e) {
+      return { success: false, error: err(`  ${e instanceof Error ? e.message : String(e)}`) };
+    }
   }
 
   private async handleCollateral(command: ParsedCommand): Promise<TxResult> {
@@ -850,7 +907,68 @@ export class ExecutionEngine implements IExecutionEngine {
   }
 
   private async handleViewBalance(): Promise<TxResult> {
-    return { success: true, error: dim('  Wallet balance — connect wallet in Phase 2') };
+    if (!this.wallet.isConnected) {
+      return { success: true, error: dim('  Wallet not connected. Use mode 2 (Live) to connect wallet.') };
+    }
+
+    const lines = [
+      '',
+      `  ${accentBold('WALLET BALANCE')}`,
+      `  ${dim('─'.repeat(48))}`,
+      '',
+      `  ${dim('Address:')}  ${chalk.white(this.wallet.shortAddress)}`,
+      '',
+    ];
+
+    try {
+      const solBal = await this.state.getBalance('SOL');
+      const usdcBal = await this.state.getBalance('USDC');
+      const solPrice = await this.state.getPrice('SOL');
+      const solUsd = solBal * solPrice;
+
+      lines.push(`  ${dim('SOL:')}     ${chalk.white(solBal.toFixed(4))} ${dim(`($${solUsd.toFixed(2)})`)}`);
+      lines.push(`  ${dim('USDC:')}    ${chalk.white('$' + usdcBal.toFixed(2))}`);
+      lines.push('');
+      lines.push(`  ${dim('Total:')}   ${chalk.white.bold(formatUsd(solUsd + usdcBal))}`);
+    } catch {
+      lines.push(`  ${dim('Could not fetch balances')}`);
+    }
+
+    lines.push(`  ${dim('─'.repeat(48))}`, '');
+    return { success: true, error: lines.join('\n') };
+  }
+
+  private async handleViewOrders(): Promise<TxResult> {
+    if (!this.wallet.isConnected) {
+      return { success: true, error: dim('  No wallet connected') };
+    }
+
+    try {
+      const orders = await this.api.getOrders(this.wallet.publicKey!.toBase58()) as Record<string, unknown>[];
+
+      if (!orders || orders.length === 0) {
+        return { success: true, error: dim('  No open orders') };
+      }
+
+      const lines = [
+        '',
+        `  ${accentBold('ORDERS')}  ${dim(`(${orders.length})`)}`,
+        '',
+      ];
+
+      for (const order of orders) {
+        const market = String(order['marketSymbol'] ?? '');
+        const side = String(order['sideUi'] ?? order['side'] ?? '');
+        const trigger = order['triggerPrice'] ?? order['limitPrice'] ?? '';
+        const orderType = order['isStopLoss'] ? 'SL' : (order['isTakeProfit'] ? 'TP' : 'LIMIT');
+        lines.push(`  ${pad(market, 8)} ${pad(side, 6)} ${pad(orderType, 6)} trigger: ${trigger}`);
+      }
+
+      lines.push('');
+      return { success: true, error: lines.join('\n') };
+    } catch {
+      return { success: true, error: dim('  Could not fetch orders') };
+    }
   }
 
   // ─── Trade History ────────────────────────────────────────────────────
@@ -1010,26 +1128,19 @@ export class ExecutionEngine implements IExecutionEngine {
       `  ${chalk.cyan('ORDERS')}`,
       `    set tp SOL 200             Set take profit`,
       `    set sl SOL 170             Set stop loss`,
-      `    limit long SOL 10x $100 at $180`,
-      '',
-      `  ${chalk.cyan('SWAP')}`,
-      `    swap 50 USDC to SOL        Spot swap`,
-      '',
-      `  ${chalk.cyan('LP / EARN')}`,
-      `    deposit 500 USDC into Crypto.1`,
-      `    withdraw 100 USDC from Crypto.1`,
-      `    collect Crypto.1           Collect LP fees`,
+      `    cancel SOL long            Cancel orders`,
       '',
       `  ${chalk.cyan('VIEW')}`,
       `    positions / pos            View positions`,
+      `    orders                     View open orders`,
       `    portfolio / pf             Portfolio overview`,
       `    markets                    All markets`,
       `    market SOL                 Market detail`,
       `    prices                     Price feed`,
       `    pools                      Pool overview`,
-      `    balance                    Wallet balance`,
+      `    balance / bal              Wallet balance`,
       `    trades / history           Trade history`,
-      `    stats                      Execution statistics`,
+      `    stats                      Execution metrics`,
       '',
       `  ${chalk.cyan('SYSTEM')}`,
       `    health                     System status`,
