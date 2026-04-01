@@ -146,6 +146,15 @@ export class ExecutionEngine implements IExecutionEngine {
       [Action.Analyze]: 'analyze',
       [Action.ViewTrades]: 'trades',
       [Action.Health]: 'health',
+      [Action.ViewVolume]: 'volume',
+      [Action.ViewFees]: 'fees',
+      [Action.ViewOI]: 'oi',
+      [Action.ViewFunding]: 'funding',
+      [Action.FafStatus]: 'faf',
+      [Action.WalletStatus]: 'wallet',
+      [Action.Doctor]: 'doctor',
+      [Action.ViewTokens]: 'tokens',
+      [Action.Monitor]: 'monitor',
     };
     return map[action] ?? '';
   }
@@ -318,8 +327,11 @@ export class ExecutionEngine implements IExecutionEngine {
         return this.handleHealth();
       case Action.Doctor:
         return this.handleDoctor();
-      case Action.Monitor:
-        return { success: true, error: dim('  Live monitor: use "dashboard" for current overview.\n  Real-time streaming not available in API-only mode.') };
+      case Action.Monitor: {
+        const { runMonitor } = await import('../cli/monitor.js');
+        const output = await runMonitor(this.state, this.api, this.wallet);
+        return { success: true, error: output };
+      }
 
       // ─── Wallet ─────────────────────────────────────────────────────
       case Action.WalletCreate:
@@ -1485,6 +1497,15 @@ export class ExecutionEngine implements IExecutionEngine {
       'analyze':    `  ${dim('Next:')} long <market> ... ${dim('│')} set tp ... ${dim('│')} risk`,
       'trades':     `  ${dim('Next:')} pnl ${dim('│')} stats ${dim('│')} dashboard`,
       'health':     `  ${dim('Next:')} dashboard ${dim('│')} doctor ${dim('│')} rpc`,
+      'volume':     `  ${dim('Next:')} fees ${dim('│')} open interest ${dim('│')} dashboard`,
+      'fees':       `  ${dim('Next:')} volume ${dim('│')} earn ${dim('│')} dashboard`,
+      'oi':         `  ${dim('Next:')} funding SOL ${dim('│')} volume ${dim('│')} risk`,
+      'funding':    `  ${dim('Next:')} open interest ${dim('│')} risk ${dim('│')} positions`,
+      'faf':        `  ${dim('Next:')} faf stake <amt> ${dim('│')} faf claim ${dim('│')} faf tier`,
+      'wallet':     `  ${dim('Next:')} wallet tokens ${dim('│')} wallet list ${dim('│')} dashboard`,
+      'doctor':     `  ${dim('Next:')} health ${dim('│')} dashboard ${dim('│')} rpc`,
+      'tokens':     `  ${dim('Next:')} allocation ${dim('│')} dashboard ${dim('│')} long SOL ...`,
+      'monitor':    `  ${dim('Next:')} dashboard ${dim('│')} positions ${dim('│')} pnl`,
     };
     return hints[context] ?? '';
   }
@@ -1716,6 +1737,7 @@ export class ExecutionEngine implements IExecutionEngine {
       `    inspect pool Crypto.1      Pool inspection`,
       `    inspect market SOL         Market inspection`,
       `    doctor                     System diagnostic`,
+      `    monitor / live             Live price + PnL tracker`,
       '',
       `  ${chalk.cyan('SYSTEM')}`,
       `    health                     System status`,
