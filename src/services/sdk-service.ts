@@ -94,6 +94,14 @@ export class SdkService {
     return this.client !== null && this.connection !== null;
   }
 
+  get perpClient(): import('flash-sdk').PerpetualsClient | null {
+    return this.client;
+  }
+
+  getPoolConfig(name: string): import('flash-sdk').PoolConfig | null {
+    return this.poolConfigs.get(name) ?? null;
+  }
+
   // ─── FAF Staking ──────────────────────────────────────────────────────
 
   /**

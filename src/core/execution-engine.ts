@@ -39,6 +39,11 @@ import {
   handleEarnPnl, handleEarnPositions, handleEarnHistory, handleEarnExecution,
 } from '../earn/earn-handlers.js';
 import type { SdkService } from '../services/sdk-service.js';
+import {
+  handleFafDashboard, handleFafStake, handleFafUnstake, handleFafClaim,
+  handleFafTier, handleFafRewards, handleFafReferral, handleFafPoints,
+  handleFafRequests,
+} from '../faf/faf-handlers.js';
 import { StateConsistency } from './state-consistency.js';
 import { getMetrics } from './metrics.js';
 import { ErrorCode } from '../types/errors.js';
@@ -224,18 +229,25 @@ export class ExecutionEngine implements IExecutionEngine {
       case Action.ViewDepth:
         return { success: true, error: dim('  Analytics data not available via API. Use flash.trade website.') };
 
-      // ─── FAF ────────────────────────────────────────────────────────
+      // ─── FAF (SDK-based, on-chain data) ─────────────────────────────
       case Action.FafStatus:
+        return handleFafDashboard(this.sdkService, this.wallet);
       case Action.FafTier:
+        return handleFafTier(this.sdkService, this.wallet);
       case Action.FafRewards:
+        return handleFafRewards(this.sdkService, this.wallet);
       case Action.FafReferral:
+        return handleFafReferral(this.sdkService, this.wallet);
       case Action.FafPoints:
+        return handleFafPoints(this.sdkService, this.wallet);
       case Action.FafRequests:
-        return this.handleFafView(command);
+        return handleFafRequests(this.sdkService, this.wallet);
       case Action.FafStake:
+        return handleFafStake(command.params.amount ?? 0, this.sdkService, this.wallet);
       case Action.FafUnstake:
+        return handleFafUnstake(command.params.amount ?? 0, this.sdkService, this.wallet);
       case Action.FafClaim:
-        return this.handleFafAction(command);
+        return handleFafClaim(this.sdkService, this.wallet);
 
       // ─── Analytics ──────────────────────────────────────────────────
       case Action.Analyze:
@@ -1331,36 +1343,6 @@ export class ExecutionEngine implements IExecutionEngine {
   private async handleWalletTokens(): Promise<TxResult> {
     const output = await renderWalletTokens(this.wallet, this.state);
     return { success: true, error: output };
-  }
-
-  // ─── FAF Views ────────────────────────────────────────────────────────
-
-  private async handleFafView(_command: ParsedCommand): Promise<TxResult> {
-    const lines = [
-      '',
-      `  ${accentBold('FAF TOKEN')}`,
-      `  ${dim('─'.repeat(48))}`,
-      '',
-      `  ${dim('FAF staking data requires SDK.')}`,
-      `  ${dim('Use flash.trade website for FAF management.')}`,
-      '',
-      `  ${dim('Commands available with SDK service:')}`,
-      `    faf stake <amount>      Stake FAF tokens`,
-      `    faf unstake <amount>    Request unstake (90-day lock)`,
-      `    faf claim               Claim rewards`,
-      `    faf tier                VIP tier info`,
-      `    faf rewards             Pending rewards`,
-      `  ${dim('─'.repeat(48))}`,
-      '',
-    ];
-    return { success: true, error: lines.join('\n') };
-  }
-
-  private async handleFafAction(command: ParsedCommand): Promise<TxResult> {
-    if (!this.sdkService) {
-      return { success: false, error: err('  FAF operations require SDK service. SDK is available but FAF execution needs protocol support.') };
-    }
-    return { success: false, error: err(`  FAF ${command.action} — execution not yet wired. Use flash.trade.`) };
   }
 
   // ─── Analyze ──────────────────────────────────────────────────────────

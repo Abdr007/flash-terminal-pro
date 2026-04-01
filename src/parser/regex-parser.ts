@@ -401,6 +401,10 @@ const viewPatterns: PatternMatcher[] = [
     if (/^faf\s+referral$/i.test(input)) return cmd(Action.FafReferral, flags, raw);
     if (/^faf\s+points?$/i.test(input)) return cmd(Action.FafPoints, flags, raw);
     if (/^faf\s+requests?$/i.test(input)) return cmd(Action.FafRequests, flags, raw);
+    if (/^faf\s+cancel\s+(\d+)/i.test(input)) {
+      const m = input.match(/^faf\s+cancel\s+(\d+)/i)!;
+      return cmd(Action.FafRequests, { ...flags, orderId: parseInt(m[1], 10) }, raw);
+    }
 
     // Analytics
     if (/^(?:volume|vol)$/i.test(input)) return cmd(Action.ViewVolume, flags, raw);
