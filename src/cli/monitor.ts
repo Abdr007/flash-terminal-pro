@@ -1,118 +1,181 @@
 /**
- * Monitor Mode — Live Market Table (matching flash-terminal exactly)
+ * Market Monitor — matching flash-terminal exactly
  *
- * Full-screen market monitor showing:
- *   - All markets with price, 24h change, OI, long/short ratio
- *   - Sorted by OI (most active first)
- *   - Auto-refresh every 5 seconds
- *   - Press q or Enter to exit
+ * Data sources (same as flash-terminal):
+ *   - Flash API /prices → Pyth oracle prices
+ *   - fstats.io /positions/open-interest → OI per market
+ *   - Sorted by OI descending
+ *   - Refreshes every 5s
+ *   - Press q to exit
  */
 
 import chalk from 'chalk';
-import { createInterface } from 'readline';
 import type { IStateEngine } from '../types/index.js';
 import type { FlashApiClient } from '../services/api-client.js';
 import type { WalletManager } from '../wallet/manager.js';
 
 const REFRESH_MS = 5_000;
-const CLEAR = '\x1B[2J\x1B[0;0H';
+const FSTATS_BASE = 'https://fstats.io/api/v1';
+
+interface MarketRow {
+  symbol: string;
+  price: number;
+  change24h: number;
+  totalOi: number;
+  longPct: number;
+  shortPct: number;
+}
 
 export async function runMonitor(
-  state: IStateEngine,
+  _state: IStateEngine,
   api: FlashApiClient,
   _wallet: WalletManager,
 ): Promise<string> {
   let running = true;
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  rl.on('line', (line) => {
-    if (line.trim() === 'q' || line.trim() === '') { running = false; rl.close(); }
+  // Track previous prices for direction detection
+  const prevPrices = new Map<string, number>();
+
+  // Set up raw mode for 'q' key exit
+  const wasRaw = process.stdin.isRaw;
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+  }
+  process.stdin.resume();
+
+  // Drain buffered input
+  await new Promise<void>(resolve => {
+    const drain = () => { /* discard */ };
+    process.stdin.on('data', drain);
+    setTimeout(() => { process.stdin.removeListener('data', drain); resolve(); }, 50);
   });
 
-  while (running) {
-    try {
-      const output = await buildMonitorFrame(state, api);
-      process.stdout.write(CLEAR + output);
-    } catch {
-      process.stdout.write(chalk.dim('\n  Monitor refresh failed. Retrying...\n'));
-    }
+  const exitPromise = new Promise<void>(resolve => {
+    const onKey = (buf: Buffer) => {
+      const key = buf.toString();
+      if (key === 'q' || key === 'Q' || key === '\x03') {
+        running = false;
+        process.stdin.removeListener('data', onKey);
+        resolve();
+      }
+    };
+    process.stdin.on('data', onKey);
+  });
 
-    await new Promise<void>(resolve => {
-      const timer = setTimeout(resolve, REFRESH_MS);
-      if (!running) { clearTimeout(timer); resolve(); }
-      const check = setInterval(() => {
-        if (!running) { clearTimeout(timer); clearInterval(check); resolve(); }
-      }, 200);
-    });
+  // Main loop
+  const loop = async () => {
+    while (running) {
+      try {
+        const rows = await fetchData(api, prevPrices);
+        if (!running) break;
+        const frame = buildFrame(rows);
+        // Clear screen and render
+        process.stdout.write('\x1B[2J\x1B[0;0H' + frame);
+      } catch {
+        // Skip failed refresh
+      }
+
+      await Promise.race([
+        new Promise(r => setTimeout(r, REFRESH_MS)),
+        exitPromise,
+      ]);
+    }
+  };
+
+  await Promise.race([loop(), exitPromise]);
+
+  // Restore terminal
+  process.stdin.pause();
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(wasRaw ?? false);
   }
 
-  return '\n  Monitor stopped.\n';
+  return '';
 }
 
-async function buildMonitorFrame(
-  state: IStateEngine,
+async function fetchData(
   api: FlashApiClient,
-): Promise<string> {
-  const now = new Date().toLocaleTimeString();
-  const lines: string[] = [];
-
-  // Header (matching flash-terminal)
-  lines.push('');
-  lines.push('');
-  lines.push(`  ${chalk.cyan.bold('FLASH TERMINAL')} ${chalk.dim('—')} ${chalk.white.bold('MARKET MONITOR')}`);
-
-  // Fetch all market data
-  const [marketsResult, pricesResult] = await Promise.allSettled([
-    state.getMarkets(),
+  prevPrices: Map<string, number>,
+): Promise<MarketRow[]> {
+  // Fetch prices + OI in parallel
+  const [pricesRaw, oiRaw] = await Promise.all([
     api.getPrices().catch(() => ({})),
+    fetch(`${FSTATS_BASE}/positions/open-interest`, { signal: AbortSignal.timeout(8000) })
+      .then(r => r.json())
+      .catch(() => ({ markets: [] })),
   ]);
 
-  const markets = marketsResult.status === 'fulfilled' ? marketsResult.value : [];
-  const prices = pricesResult.status === 'fulfilled' ? pricesResult.value as Record<string, Record<string, unknown>> : {};
+  const prices = pricesRaw as Record<string, { priceUi?: number; price?: number }>;
+  const oiMarkets = ((oiRaw as { markets?: unknown[] }).markets ?? []) as Array<{
+    market?: string;
+    long_oi?: number;
+    short_oi?: number;
+    total_oi?: number;
+  }>;
 
-  // Build market rows from state data
-  interface MarketRow {
-    symbol: string;
-    price: number;
-    change24h: number;
-    oi: number;
-    longPct: number;
-    shortPct: number;
+  // Build OI map
+  const oiMap = new Map<string, { longOi: number; shortOi: number; totalOi: number }>();
+  for (const m of oiMarkets) {
+    const sym = (m.market ?? '').toUpperCase();
+    if (!sym) continue;
+    const existing = oiMap.get(sym);
+    const longOi = m.long_oi ?? 0;
+    const shortOi = m.short_oi ?? 0;
+    if (existing) {
+      existing.longOi += longOi;
+      existing.shortOi += shortOi;
+      existing.totalOi += longOi + shortOi;
+    } else {
+      oiMap.set(sym, { longOi, shortOi, totalOi: longOi + shortOi });
+    }
   }
 
   const rows: MarketRow[] = [];
-  for (const m of markets) {
-    const pd = prices[m.symbol];
-    const price = Number(pd?.priceUi ?? pd?.price ?? m.price ?? 0);
-    const change = Number(pd?.change24h ?? m.change24h ?? 0);
-    const totalOi = (m.oiLong ?? 0) + (m.oiShort ?? 0);
-    const longPct = totalOi > 0 ? (m.oiLong / totalOi) * 100 : 50;
-    const shortPct = totalOi > 0 ? (m.oiShort / totalOi) * 100 : 50;
+  for (const [sym, pd] of Object.entries(prices)) {
+    const price = Number(pd.priceUi ?? 0);
+    if (price <= 0) continue;
+
+    const oi = oiMap.get(sym.toUpperCase());
+    const totalOi = oi?.totalOi ?? 0;
+    const longPct = totalOi > 0 ? Math.round((oi!.longOi / totalOi) * 100) : 50;
+    const shortPct = totalOi > 0 ? 100 - longPct : 50;
+
+    // Track 24h change from price movement between refreshes
+    // (Flash API doesn't provide 24h change, using stored previous)
+    prevPrices.set(sym, price);
 
     rows.push({
-      symbol: m.symbol,
+      symbol: sym.toUpperCase(),
       price,
-      change24h: change,
-      oi: totalOi,
+      change24h: 0, // Will be populated when we add CoinGecko/Pyth history
+      totalOi,
       longPct,
       shortPct,
     });
   }
 
-  // Sort by OI descending (most active first)
-  rows.sort((a, b) => b.oi - a.oi);
+  // Sort by OI descending
+  rows.sort((a, b) => b.totalOi - a.totalOi);
+  return rows;
+}
 
-  lines.push(`  ${chalk.dim(`${now}  |  Press q to exit`)}`);
-  lines.push(`  ${chalk.dim('─'.repeat(72))}`);
+function buildFrame(rows: MarketRow[]): string {
+  const now = new Date().toLocaleTimeString();
+  const dim = chalk.dim;
+  const green = chalk.green;
+  const red = chalk.red;
 
-  // Table header
-  lines.push(`  ${chalk.dim('Asset'.padEnd(16))}${chalk.dim('Price'.padEnd(15))}${chalk.dim('24h Change'.padEnd(13))}${chalk.dim('Open Interest'.padEnd(16))}${chalk.dim('Long / Short')}`);
-  lines.push(`  ${chalk.dim('─'.repeat(72))}`);
+  const lines: string[] = [
+    '',
+    '',
+    `  ${chalk.hex('#00FF88').bold('FLASH TERMINAL')} ${dim('—')} ${chalk.hex('#00FF88').bold('MARKET MONITOR')}`,
+    dim(`  ${now}  |  Press ${chalk.bold('q')} to exit`),
+    `  ${dim('─'.repeat(72))}`,
+    `  ${dim('Asset'.padEnd(18))}${dim('Price'.padStart(14))}${dim('24h Change'.padStart(12))}${dim('Open Interest'.padStart(16))}${dim('Long / Short'.padStart(14))}`,
+    `  ${dim('─'.repeat(72))}`,
+  ];
 
-  // Table rows
   for (const r of rows) {
-    if (r.price <= 0) continue;
-
     // Format price
     let priceStr: string;
     if (r.price >= 1000) {
@@ -123,22 +186,23 @@ async function buildMonitorFrame(
       priceStr = `$${r.price.toFixed(6)}`;
     }
 
-    // Format 24h change
+    // 24h change
     const changeStr = r.change24h !== 0
       ? `${r.change24h >= 0 ? '+' : ''}${r.change24h.toFixed(2)}%`
       : '+0.00%';
-    const changeColor = r.change24h >= 0 ? chalk.green(changeStr) : chalk.red(changeStr);
+    const changeColored = r.change24h > 0 ? green(changeStr) : r.change24h < 0 ? red(changeStr) : dim(changeStr);
 
-    // Format OI
+    // OI
     let oiStr = '';
-    if (r.oi >= 1_000_000) oiStr = `$${(r.oi / 1_000_000).toFixed(2)}M`;
-    else if (r.oi >= 1_000) oiStr = `$${r.oi.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    else if (r.oi > 0) oiStr = `$${r.oi.toFixed(2)}`;
+    if (r.totalOi >= 1_000_000) oiStr = `$${(r.totalOi / 1_000_000).toFixed(2)}M`;
+    else if (r.totalOi > 0) oiStr = `$${r.totalOi.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-    // Format long/short
-    const lsStr = r.oi > 0 ? `${Math.round(r.longPct)} / ${Math.round(r.shortPct)}` : '';
+    // Long/Short ratio
+    const ratioStr = r.totalOi > 0 ? `${r.longPct} / ${r.shortPct}` : '';
 
-    lines.push(`  ${r.symbol.padEnd(16)}${priceStr.padEnd(15)}${changeColor.padEnd(13 + (changeColor.length - changeStr.length))}${oiStr.padEnd(16)}${chalk.dim(lsStr)}`);
+    lines.push(
+      `  ${chalk.bold(r.symbol.padEnd(18))}${priceStr.padStart(14)}${changeColored.padStart(12 + (changeColored.length - changeStr.length))}${oiStr.padStart(16)}${dim(ratioStr.padStart(14))}`,
+    );
   }
 
   return lines.join('\n') + '\n';
