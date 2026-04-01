@@ -65,6 +65,7 @@ import {
   ok,
   pad,
 } from '../utils/format.js';
+import { titleBlock } from '../cli/display.js';
 
 // ─── ExecutionEngine ────────────────────────────────────────────────────────
 
@@ -1058,23 +1059,36 @@ export class ExecutionEngine implements IExecutionEngine {
     }
 
     const totalPnl = positions.reduce((s, p) => s + p.pnl, 0);
-    const totalSize = positions.reduce((s, p) => s + p.sizeUsd, 0);
+    const totalExposure = positions.reduce((s, p) => s + p.sizeUsd, 0);
 
+    // Matching flash-terminal exact format
     const lines = [
+      titleBlock('POSITIONS'),
       '',
-      `  ${accentBold('POSITIONS')}  ${dim(`(${positions.length})`)}`,
-      `  ${dim('─'.repeat(68))}`,
-      '',
-      dim(`  ${pad('Market', 8)} ${pad('Side', 6)} ${pad('Lev', 6)} ${pad('Size', 10)} ${pad('Entry', 10)} ${pad('Liq', 10)} ${pad('PnL', 10)}`),
-      dim('  ' + '─'.repeat(68)),
     ];
 
+    // Header: Market Side Lev Size Collateral Entry Mark PnL Fees Liq
+    const hdr = `${pad('Market', 8)}${pad('Side', 6)}${pad('Lev', 6)}${pad('Size', 8)}${pad('Collateral', 12)}${pad('Entry', 12)}${pad('Mark', 12)}${pad('PnL', 17)}${pad('Fees', 7)}${pad('Liq', 18)}`;
+    lines.push(dim(hdr));
+    lines.push(dim('─'.repeat(hdr.length)));
+
     for (const p of positions) {
-      lines.push(`  ${pad(p.market, 8)} ${colorSide(p.side).padEnd(6)} ${pad(p.leverage.toFixed(1) + 'x', 6)} ${pad(formatUsd(p.sizeUsd), 10)} ${pad(formatPrice(p.entryPrice), 10)} ${pad(formatPrice(p.liquidationPrice), 10)} ${colorPnl(p.pnl).padEnd(10)}`);
+      const pnlPct = p.collateralUsd > 0 ? (p.pnl / p.collateralUsd * 100).toFixed(2) : '0.00';
+      const pnlStr = `${formatUsd(p.pnl)} (${pnlPct}%)`;
+      const pnlColored = p.pnl >= 0 ? chalk.green(pnlStr) : chalk.red(pnlStr);
+
+      const liqDist = p.entryPrice > 0 && p.liquidationPrice > 0
+        ? Math.abs(p.entryPrice - p.liquidationPrice) / p.entryPrice * 100
+        : 0;
+      const liqStr = `${formatPrice(p.liquidationPrice)} (${liqDist.toFixed(1)}%)`;
+
+      lines.push(
+        `${pad(p.market, 8)}${pad(colorSide(p.side), 6)}${pad(p.leverage.toFixed(1) + 'x', 6)}${pad(formatUsd(p.sizeUsd), 8)}${pad(formatUsd(p.collateralUsd), 12)}${pad(formatPrice(p.entryPrice), 12)}${pad(formatPrice(p.markPrice), 12)}${pad(pnlColored, 17)}${pad(formatUsd(p.fees), 7)}${pad(liqStr, 18)}`
+      );
     }
 
-    lines.push(`  ${dim('─'.repeat(68))}`);
-    lines.push(`  ${dim('Total:')} ${formatUsd(totalSize)} size  ${colorPnl(totalPnl)} PnL`);
+    lines.push('');
+    lines.push(`  ${dim('Total PnL:')} ${colorPnl(totalPnl)}  ${dim('|  Exposure:')} ${formatUsd(totalExposure)}  ${dim('|  Open:')} ${positions.length}`);
     lines.push('');
     return { success: true, error: lines.join('\n') };
   }
@@ -1113,17 +1127,14 @@ export class ExecutionEngine implements IExecutionEngine {
   private async handleViewMarkets(): Promise<TxResult> {
     const markets = await this.state.getMarkets();
 
+    // Matching flash-terminal: "MARKET → Pool" format
     const lines = [
+      titleBlock('FLASH TRADE MARKETS'),
       '',
-      `  ${accentBold('MARKETS')}  ${dim(`(${markets.length} available)`)}`,
-      '',
-      dim(`  ${pad('Symbol', 10)} ${pad('Pool', 16)} ${pad('Max Lev', 10)} ${pad('Status', 8)}`),
-      dim('  ' + '─'.repeat(50)),
     ];
 
     for (const m of markets) {
-      const status = m.isOpen ? ok('OPEN') : err('CLOSED');
-      lines.push(`  ${pad(m.symbol, 10)} ${pad(m.pool, 16)} ${pad(m.maxLeverage + 'x', 10)} ${status}`);
+      lines.push(`  ${pad(m.symbol, 13)}${dim('→')} ${accentBold(m.pool)}`);
     }
 
     lines.push('');
