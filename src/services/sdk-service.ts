@@ -30,7 +30,7 @@ import {
   ComputeBudgetProgram,
   type AddressLookupTableAccount,
 } from '@solana/web3.js';
-import { AnchorProvider, Wallet } from '@coral-xyz/anchor';
+import { AnchorProvider, Wallet, BN } from '@coral-xyz/anchor';
 import { getLogger } from '../utils/logger.js';
 import type { FlashXConfig } from '../types/index.js';
 
@@ -396,7 +396,6 @@ export class SdkService {
     if (!pc) { log.error('SDK', `Pool ${poolName} not found`); return null; }
 
     try {
-      const { BN } = await import('@coral-xyz/anchor');
       const { getAssociatedTokenAddress, getAccount } = await import('@solana/spl-token');
 
       // Helper: get token balance as BN
