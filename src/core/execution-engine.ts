@@ -82,6 +82,7 @@ export class ExecutionEngine implements IExecutionEngine {
 
   /**
    * Main entry point — routes a parsed command to the appropriate handler.
+   * Appends contextual hints after every successful response.
    */
   async execute(command: ParsedCommand): Promise<TxResult> {
     const log = getLogger();
@@ -96,6 +97,48 @@ export class ExecutionEngine implements IExecutionEngine {
       };
     }
 
+    const result = await this.dispatch(command);
+
+    // Append contextual hint to successful responses
+    if (result.success && result.error) {
+      const hintKey = this.getHintKey(command.action);
+      const hintText = this.hint(hintKey);
+      if (hintText) {
+        result.error = result.error + '\n' + hintText + '\n';
+      }
+    }
+
+    return result;
+  }
+
+  private getHintKey(action: Action): string {
+    const map: Partial<Record<Action, string>> = {
+      [Action.OpenPosition]: 'open',
+      [Action.ClosePosition]: 'close',
+      [Action.ReversePosition]: 'reverse',
+      [Action.AddCollateral]: 'collateral',
+      [Action.RemoveCollateral]: 'collateral',
+      [Action.TakeProfit]: 'tp',
+      [Action.StopLoss]: 'sl',
+      [Action.CancelOrder]: 'cancel',
+      [Action.CancelAllOrders]: 'cancel',
+      [Action.ViewPositions]: 'positions',
+      [Action.ViewPortfolio]: 'portfolio',
+      [Action.ViewMarkets]: 'markets',
+      [Action.ViewEarn]: 'earn',
+      [Action.ViewBalance]: 'balance',
+      [Action.ViewPnl]: 'pnl',
+      [Action.ViewRisk]: 'risk',
+      [Action.ViewExposure]: 'exposure',
+      [Action.ViewDashboard]: 'dashboard',
+      [Action.Analyze]: 'analyze',
+      [Action.ViewTrades]: 'trades',
+      [Action.Health]: 'health',
+    };
+    return map[action] ?? '';
+  }
+
+  private async dispatch(command: ParsedCommand): Promise<TxResult> {
     switch (command.action) {
       // ─── Trading ────────────────────────────────────────────────────
       case Action.OpenPosition:
@@ -479,8 +522,6 @@ export class ExecutionEngine implements IExecutionEngine {
     });
 
     log.success('ENGINE', `Trade complete: ${txResult.signature?.slice(0, 16)}... (${durationMs}ms)`);
-    lines.push(this.hint('open'));
-    lines.push('');
     return { success: true, signature: txResult.signature, fees: estFee, error: lines.join('\n') };
   }
 
@@ -1509,10 +1550,25 @@ export class ExecutionEngine implements IExecutionEngine {
 
   private hint(context: string): string {
     const hints: Record<string, string> = {
-      'open': dim('  Tip: "positions" to view, "set tp SOL <price>" for take profit'),
-      'close': dim('  Tip: "pnl" for profit report, "trades" for history'),
-      'tp': dim('  Tip: "orders" to view active orders'),
-      'sl': dim('  Tip: "orders" to view active orders'),
+      'open':       `  ${dim('Next:')} positions ${dim('│')} set tp SOL <price> ${dim('│')} risk ${dim('│')} dashboard`,
+      'close':      `  ${dim('Next:')} pnl ${dim('│')} trades ${dim('│')} dashboard ${dim('│')} long SOL ...`,
+      'tp':         `  ${dim('Next:')} orders ${dim('│')} positions ${dim('│')} risk`,
+      'sl':         `  ${dim('Next:')} orders ${dim('│')} positions ${dim('│')} risk`,
+      'cancel':     `  ${dim('Next:')} orders ${dim('│')} positions`,
+      'collateral': `  ${dim('Next:')} positions ${dim('│')} risk ${dim('│')} close SOL`,
+      'reverse':    `  ${dim('Next:')} positions ${dim('│')} pnl ${dim('│')} risk`,
+      'positions':  `  ${dim('Next:')} close <market> ${dim('│')} add $50 to SOL ${dim('│')} risk ${dim('│')} pnl`,
+      'portfolio':  `  ${dim('Next:')} positions ${dim('│')} allocation ${dim('│')} pnl ${dim('│')} earn`,
+      'markets':    `  ${dim('Next:')} market SOL ${dim('│')} long SOL ... ${dim('│')} analyze SOL`,
+      'earn':       `  ${dim('Next:')} pool Crypto.1 ${dim('│')} earn best ${dim('│')} dashboard`,
+      'balance':    `  ${dim('Next:')} tokens ${dim('│')} allocation ${dim('│')} long SOL ...`,
+      'pnl':        `  ${dim('Next:')} exposure ${dim('│')} risk ${dim('│')} trades`,
+      'risk':       `  ${dim('Next:')} close <market> ${dim('│')} add $50 to SOL ${dim('│')} positions`,
+      'exposure':   `  ${dim('Next:')} risk ${dim('│')} pnl ${dim('│')} close <market>`,
+      'dashboard':  `  ${dim('Next:')} positions ${dim('│')} long SOL ... ${dim('│')} earn ${dim('│')} pnl`,
+      'analyze':    `  ${dim('Next:')} long <market> ... ${dim('│')} set tp ... ${dim('│')} risk`,
+      'trades':     `  ${dim('Next:')} pnl ${dim('│')} stats ${dim('│')} dashboard`,
+      'health':     `  ${dim('Next:')} dashboard ${dim('│')} doctor ${dim('│')} rpc`,
     };
     return hints[context] ?? '';
   }
