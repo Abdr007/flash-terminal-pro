@@ -609,7 +609,7 @@ export class ExecutionEngine implements IExecutionEngine {
     const auditStatus = consistencyResult.consistent ? 'confirmed' : 'inconsistent';
 
     lines.push('');
-    lines.push(`  ${chalk.green('✓')} Trade executed: ${txResult.signature?.slice(0, 16)}...`);
+    lines.push(`  ${chalk.green('✓')} Trade executed: ${txResult.signature}`);
     lines.push(`  ${dim(`Duration: ${durationMs}ms`)}`);
     lines.push(`  ${dim(`https://solscan.io/tx/${txResult.signature}`)}`);
 
@@ -632,7 +632,7 @@ export class ExecutionEngine implements IExecutionEngine {
       durationMs, pool, slippageBps: this.config.defaultSlippageBps, retryCount: txResult.retryCount,
     });
 
-    log.success('ENGINE', `Trade complete: ${txResult.signature?.slice(0, 16)}... (${durationMs}ms)`);
+    log.success('ENGINE', `Trade complete: ${txResult.signature} (${durationMs}ms)`);
     return { success: true, signature: txResult.signature, fees: estFee, error: lines.join('\n') };
   }
 
@@ -747,7 +747,7 @@ export class ExecutionEngine implements IExecutionEngine {
     }
 
     lines.push('');
-    lines.push(`  ${chalk.green('✓')} Position closed: ${txResult.signature?.slice(0, 16)}...`);
+    lines.push(`  ${chalk.green('✓')} Position closed: ${txResult.signature}`);
     lines.push(`  ${dim(`Duration: ${durationMs}ms`)}`);
     lines.push(`  ${dim(`https://solscan.io/tx/${txResult.signature}`)}`);
     lines.push('');
@@ -755,7 +755,7 @@ export class ExecutionEngine implements IExecutionEngine {
     metrics.recordTradeSuccess(durationMs);
     audit.log({ timestamp: new Date().toISOString(), action: 'close_position', command: command.raw, market, side, sizeUsd: position.sizeUsd, txHash: txResult.signature, status: 'confirmed', durationMs });
 
-    log.success('ENGINE', `Close complete: ${txResult.signature?.slice(0, 16)}... (${durationMs}ms)`);
+    log.success('ENGINE', `Close complete: ${txResult.signature} (${durationMs}ms)`);
     return { success: true, signature: txResult.signature, error: lines.join('\n') };
   }
 
@@ -808,7 +808,7 @@ export class ExecutionEngine implements IExecutionEngine {
         return { success: false, error: lines.join('\n') };
       }
 
-      lines.push('', `  ${chalk.green('✓')} Position reversed: ${txResult.signature?.slice(0, 16)}...`);
+      lines.push('', `  ${chalk.green('✓')} Position reversed: ${txResult.signature}`);
       lines.push(`  ${dim(`Duration: ${durationMs}ms`)}`);
       lines.push(`  ${dim(`https://solscan.io/tx/${txResult.signature}`)}`, '');
       audit.log({ timestamp: new Date().toISOString(), action: 'reverse_position', market, side: position.side, txHash: txResult.signature, status: 'confirmed', durationMs });
@@ -878,7 +878,7 @@ export class ExecutionEngine implements IExecutionEngine {
         return { success: false, error: lines.join('\n') };
       }
 
-      lines.push('', `  ${chalk.green('✓')} Collateral ${isAdd ? 'added' : 'removed'}: ${txResult.signature?.slice(0, 16)}...`, `  ${dim(`Duration: ${durationMs}ms`)}`, '');
+      lines.push('', `  ${chalk.green('✓')} Collateral ${isAdd ? 'added' : 'removed'}: ${txResult.signature}`, `  ${dim(`Duration: ${durationMs}ms`)}`, '');
       audit.log({ timestamp: new Date().toISOString(), action: isAdd ? 'add_collateral' : 'remove_collateral', market, collateral: value, txHash: txResult.signature, status: 'confirmed', durationMs });
       return { success: true, signature: txResult.signature, error: lines.join('\n') };
     } catch (e) {
@@ -928,7 +928,7 @@ export class ExecutionEngine implements IExecutionEngine {
         if (!txResult.success) return { success: false, error: err(`  ${txResult.error}`) };
 
         audit.log({ timestamp: new Date().toISOString(), action: 'cancel_order', market, txHash: txResult.signature, status: 'confirmed' });
-        return { success: true, signature: txResult.signature, error: `\n  ${chalk.green('✓')} Order cancelled: ${txResult.signature?.slice(0, 16)}...\n` };
+        return { success: true, signature: txResult.signature, error: `\n  ${chalk.green('✓')} Order cancelled: ${txResult.signature}\n` };
       } catch (e) {
         return { success: false, error: err(`  ${e instanceof Error ? e.message : String(e)}`) };
       }
@@ -988,7 +988,7 @@ export class ExecutionEngine implements IExecutionEngine {
           return { success: false, error: lines.join('\n') };
         }
 
-        lines.push('', `  ${chalk.green('✓')} ${label} set: ${txResult.signature?.slice(0, 16)}...`, '');
+        lines.push('', `  ${chalk.green('✓')} ${label} set: ${txResult.signature}`, '');
         audit.log({ timestamp: new Date().toISOString(), action: isStopLoss ? 'stop_loss' : 'take_profit', market, side: position.side, txHash: txResult.signature, status: 'confirmed' });
         return { success: true, signature: txResult.signature, error: lines.join('\n') };
       } catch (e) {
@@ -1054,7 +1054,7 @@ export class ExecutionEngine implements IExecutionEngine {
       return {
         success: true,
         signature: txResult.signature,
-        error: `\n  ${chalk.green('✓')} LP ${isDeposit ? 'deposited' : 'withdrawn'}: ${txResult.signature?.slice(0, 16)}...\n  ${dim(`https://solscan.io/tx/${txResult.signature}`)}\n`,
+        error: `\n  ${chalk.green('✓')} LP ${isDeposit ? 'deposited' : 'withdrawn'}: ${txResult.signature}\n  ${dim(`https://solscan.io/tx/${txResult.signature}`)}\n`,
       };
     } catch (e) {
       return { success: false, error: err(`  LP failed: ${e instanceof Error ? e.message : String(e)}`) };
@@ -1529,7 +1529,7 @@ export class ExecutionEngine implements IExecutionEngine {
         action === 'cancel' ? `  Request #           ${amount}` : '',
         action === 'cancel' ? `  Tokens returned to staked balance.` : '',
         '',
-        `  Tx: ${txResult.signature?.slice(0, 16)}...`,
+        `  Tx: ${txResult.signature}`,
         `  ${dim(`Duration: ${durationMs}ms`)}`,
         `  ${dim(`https://solscan.io/tx/${txResult.signature}`)}`,
         '',
@@ -1611,7 +1611,7 @@ export class ExecutionEngine implements IExecutionEngine {
       '',
     ];
     for (const sig of sigs) {
-      lines.push(`  Tx: ${sig.slice(0, 16)}...`);
+      lines.push(`  Tx: ${sig}`);
     }
     lines.push(`  ${dim(`Duration: ${durationMs}ms`)}`);
     if (sigs[0]) lines.push(`  ${dim(`https://solscan.io/tx/${sigs[0]}`)}`);
@@ -1721,7 +1721,7 @@ export class ExecutionEngine implements IExecutionEngine {
       lines.push(`  Received            USDC rewards`);
     }
     lines.push('');
-    lines.push(`  Tx: ${txResult.signature?.slice(0, 16)}...`);
+    lines.push(`  Tx: ${txResult.signature}`);
     lines.push(`  ${dim(`Duration: ${durationMs}ms`)}`);
     lines.push(`  ${dim(`https://solscan.io/tx/${txResult.signature}`)}`);
     lines.push('');
