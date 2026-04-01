@@ -98,6 +98,33 @@ export async function renderDashboard(
     lines.push(`  Positions  ${allocBar(posPct)} ${posPct.toFixed(0)}%`);
   }
 
+  // ─── Risk ───────────────────────────────────────────────────────
+  if (pos.length > 0) {
+    const avgLev = pos.reduce((s, p) => s + p.leverage, 0) / pos.length;
+    const maxLev = Math.max(...pos.map(p => p.leverage));
+    lines.push(section('RISK'));
+    lines.push(kv('Avg Leverage', avgLev.toFixed(1) + 'x'));
+    lines.push(kv('Max Leverage', maxLev.toFixed(1) + 'x'));
+    lines.push(kv('Positions', String(pos.length)));
+  }
+
+  // ─── Recent Trades ─────────────────────────────────────────────
+  const audit = (await import('../security/audit-log.js')).getAuditLog();
+  const recentTrades = audit.readRecent(5);
+  if (recentTrades.length > 0) {
+    lines.push(section('RECENT TRADES'));
+    for (const t of recentTrades.reverse()) {
+      const time = t.timestamp.slice(11, 19);
+      const action = (t.action ?? '').slice(0, 10);
+      const market = t.market ?? t.inputToken ?? '';
+      const st = t.status === 'confirmed' ? chalk.green('✓')
+        : t.status === 'failed' ? chalk.red('✗')
+        : t.status === 'blocked' ? chalk.yellow('⊘')
+        : chalk.dim('◦');
+      lines.push(`  ${st} ${dim(time)} ${action.padEnd(12)} ${market}`);
+    }
+  }
+
   // ─── Markets ────────────────────────────────────────────────────
   lines.push(section('TOP MARKETS'));
   const topMarkets = mkts.filter(m => ['SOL', 'BTC', 'ETH', 'XAU', 'JUP'].includes(m.symbol));

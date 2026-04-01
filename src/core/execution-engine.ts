@@ -32,6 +32,7 @@ import { resolvePool } from '../services/pool-resolver.js';
 import { estimateOpenPosition, crossValidateWithEstimate } from '../services/quote-engine.js';
 import { getAuditLog } from '../security/audit-log.js';
 import { renderDashboard, renderWalletTokens } from '../cli/dashboard.js';
+import { renderPnl, renderExposure, renderRisk } from '../cli/analytics.js';
 import type { SdkService } from '../services/sdk-service.js';
 import { StateConsistency } from './state-consistency.js';
 import { getMetrics } from './metrics.js';
@@ -159,6 +160,12 @@ export class ExecutionEngine implements IExecutionEngine {
         return this.handleDashboard();
       case Action.ViewWalletTokens:
         return this.handleWalletTokens();
+      case Action.ViewPnl:
+        return { success: true, error: await renderPnl(this.state) };
+      case Action.ViewExposure:
+        return { success: true, error: await renderExposure(this.state) };
+      case Action.ViewRisk:
+        return { success: true, error: await renderRisk(this.state) };
       case Action.ViewFunding:
       case Action.ViewOI:
       case Action.ViewFees:
@@ -1456,6 +1463,11 @@ export class ExecutionEngine implements IExecutionEngine {
       `    token SOL                  Token detail + position`,
       `    allocation                 Portfolio breakdown`,
       '',
+      `  ${chalk.cyan('ANALYTICS')}`,
+      `    pnl                        PnL report (unrealized + session)`,
+      `    exposure                   Exposure by market + direction`,
+      `    risk                       Risk assessment per position`,
+      '',
       `  ${chalk.cyan('SYSTEM')}`,
       `    health                     System status`,
       `    wallet create|import|list|use`,
@@ -1521,11 +1533,50 @@ export class ExecutionEngine implements IExecutionEngine {
   }
 
   private formatUnknown(raw: string): string {
-    return [
-      '',
-      `  ${err('Unknown command:')} ${raw}`,
-      `  ${dim('Type "help" for available commands.')}`,
-      '',
-    ].join('\n');
+    // Command suggestion: find closest match
+    const known = [
+      'long', 'short', 'close', 'reverse', 'add', 'remove',
+      'set tp', 'set sl', 'cancel',
+      'positions', 'portfolio', 'markets', 'market', 'prices', 'pools', 'balance',
+      'dashboard', 'tokens', 'allocation', 'orders', 'trades', 'stats', 'earn',
+      'pnl', 'exposure', 'risk', 'health', 'config', 'help',
+      'wallet tokens', 'token',
+    ];
+
+    const input = raw.toLowerCase().trim();
+    let bestMatch = '';
+    let bestDist = Infinity;
+
+    for (const cmd of known) {
+      const d = this.editDistance(input, cmd);
+      if (d < bestDist && d <= 3) {
+        bestDist = d;
+        bestMatch = cmd;
+      }
+    }
+
+    const lines = ['', `  ${err('Unknown command:')} ${raw}`];
+    if (bestMatch) {
+      lines.push(`  ${warn('Did you mean:')} ${chalk.white.bold(bestMatch)}`);
+    }
+    lines.push(`  ${dim('Type "help" for available commands.')}`, '');
+    return lines.join('\n');
+  }
+
+  private editDistance(a: string, b: string): number {
+    if (a === b) return 0;
+    if (a.length === 0) return b.length;
+    if (b.length === 0) return a.length;
+    if (Math.abs(a.length - b.length) > 3) return 4;
+    const matrix: number[][] = [];
+    for (let i = 0; i <= a.length; i++) matrix[i] = [i];
+    for (let j = 0; j <= b.length; j++) matrix[0][j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      for (let j = 1; j <= b.length; j++) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        matrix[i][j] = Math.min(matrix[i - 1][j] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j - 1] + cost);
+      }
+    }
+    return matrix[a.length][b.length];
   }
 }

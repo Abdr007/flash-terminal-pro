@@ -386,6 +386,9 @@ const viewPatterns: PatternMatcher[] = [
     if (/^(?:tokens?|holdings|assets)$/i.test(input)) return cmd(Action.ViewTokens, flags, raw);
     if (/^(?:allocation|alloc)$/i.test(input)) return cmd(Action.ViewAllocation, flags, raw);
     if (/^(?:dashboard|dash|overview)$/i.test(input)) return cmd(Action.ViewDashboard, flags, raw);
+    if (/^(?:pnl|profit|loss|p&l)$/i.test(input)) return cmd(Action.ViewPnl, flags, raw);
+    if (/^(?:exposure|exp)$/i.test(input)) return cmd(Action.ViewExposure, flags, raw);
+    if (/^(?:risk|risk\s*report)$/i.test(input)) return cmd(Action.ViewRisk, flags, raw);
     if (/^(?:wallet\s+tokens?|holdings|assets|wallet\s+balance)$/i.test(input)) return cmd(Action.ViewWalletTokens, flags, raw);
     return null;
   },
