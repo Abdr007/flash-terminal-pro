@@ -858,22 +858,27 @@ export class ExecutionEngine implements IExecutionEngine {
   private async handleViewPositions(): Promise<TxResult> {
     const positions = await this.state.getPositions();
     if (positions.length === 0) {
-      return { success: true, error: dim('  No open positions') };
+      return { success: true, error: `\n  ${dim('No open positions')}\n` };
     }
 
-    const header = `  ${pad('Market', 10)} ${pad('Side', 6)} ${pad('Lev', 6)} ${pad('Size', 12)} ${pad('Entry', 12)} ${pad('Mark', 12)} ${pad('PnL', 12)}`;
+    const totalPnl = positions.reduce((s, p) => s + p.pnl, 0);
+    const totalSize = positions.reduce((s, p) => s + p.sizeUsd, 0);
+
     const lines = [
       '',
-      `  ${accentBold('POSITIONS')}`,
+      `  ${accentBold('POSITIONS')}  ${dim(`(${positions.length})`)}`,
+      `  ${dim('─'.repeat(68))}`,
       '',
-      dim(header),
-      dim('  ' + '─'.repeat(70)),
+      dim(`  ${pad('Market', 8)} ${pad('Side', 6)} ${pad('Lev', 6)} ${pad('Size', 10)} ${pad('Entry', 10)} ${pad('Liq', 10)} ${pad('PnL', 10)}`),
+      dim('  ' + '─'.repeat(68)),
     ];
 
     for (const p of positions) {
-      lines.push(`  ${pad(p.market, 10)} ${pad(colorSide(p.side), 6)} ${pad(p.leverage + 'x', 6)} ${pad(formatUsd(p.sizeUsd), 12)} ${pad(formatPrice(p.entryPrice), 12)} ${pad(formatPrice(p.markPrice), 12)} ${pad(colorPnl(p.pnl), 12)}`);
+      lines.push(`  ${pad(p.market, 8)} ${colorSide(p.side).padEnd(6)} ${pad(p.leverage.toFixed(1) + 'x', 6)} ${pad(formatUsd(p.sizeUsd), 10)} ${pad(formatPrice(p.entryPrice), 10)} ${pad(formatPrice(p.liquidationPrice), 10)} ${colorPnl(p.pnl).padEnd(10)}`);
     }
 
+    lines.push(`  ${dim('─'.repeat(68))}`);
+    lines.push(`  ${dim('Total:')} ${formatUsd(totalSize)} size  ${colorPnl(totalPnl)} PnL`);
     lines.push('');
     return { success: true, error: lines.join('\n') };
   }
@@ -882,16 +887,28 @@ export class ExecutionEngine implements IExecutionEngine {
     const positions = await this.state.getPositions();
     const totalPnl = positions.reduce((sum, p) => sum + p.pnl, 0);
     const totalSize = positions.reduce((sum, p) => sum + p.sizeUsd, 0);
+    const totalCollateral = positions.reduce((sum, p) => sum + p.collateralUsd, 0);
+
+    const solBal = await this.state.getBalance('SOL').catch(() => 0);
+    const usdcBal = await this.state.getBalance('USDC').catch(() => 0);
+    const solPrice = await this.state.getPrice('SOL').catch(() => 0);
+    const walletUsd = solBal * solPrice + usdcBal;
+    const totalValue = walletUsd + totalCollateral + totalPnl;
 
     return {
       success: true,
       error: [
         '',
         `  ${accentBold('PORTFOLIO')}`,
+        `  ${dim('─'.repeat(48))}`,
         '',
-        `  ${dim('Positions:')}   ${positions.length}`,
-        `  ${dim('Total Size:')}  ${formatUsd(totalSize)}`,
-        `  ${dim('Total PnL:')}   ${colorPnl(totalPnl)}`,
+        `  ${dim('Total Value:')}  ${chalk.white.bold(formatUsd(totalValue))}`,
+        `  ${dim('Wallet:')}       ${formatUsd(walletUsd)}`,
+        `  ${dim('In Positions:')} ${formatUsd(totalCollateral)}`,
+        '',
+        `  ${dim('Positions:')}    ${positions.length}`,
+        `  ${dim('Total Size:')}   ${formatUsd(totalSize)}`,
+        `  ${dim('Total PnL:')}    ${colorPnl(totalPnl)}`,
         '',
       ].join('\n'),
     };
@@ -1285,32 +1302,59 @@ export class ExecutionEngine implements IExecutionEngine {
 
   private handleTradeHistory(): TxResult {
     const audit = getAuditLog();
-    const records = audit.readRecent(20);
+    const records = audit.readRecent(50);
 
-    if (records.length === 0) {
+    // Filter: exclude swap (unsupported), keep only relevant entries
+    const filtered = records.filter(r =>
+      r.action !== 'swap' && r.status !== 'preview'
+    );
+
+    if (filtered.length === 0) {
       return { success: true, error: dim('  No trade history yet.') };
     }
 
+    const display = filtered.slice(-20); // Last 20 relevant
+
     const lines = [
       '',
-      `  ${accentBold('TRADE HISTORY')}  ${dim(`(last ${records.length})`)}`,
+      `  ${accentBold('TRADE HISTORY')}  ${dim(`(${display.length} trades)`)}`,
       '',
-      dim(`  ${pad('Time', 12)} ${pad('Action', 8)} ${pad('Market', 10)} ${pad('Amount', 12)} ${pad('Status', 12)} ${pad('Tx', 16)}`),
-      dim('  ' + '─'.repeat(74)),
+      dim(`  ${pad('Time', 10)} ${pad('Action', 14)} ${pad('Market', 8)} ${pad('Side', 6)} ${pad('Status', 14)} ${pad('Tx', 18)}`),
+      dim('  ' + '─'.repeat(72)),
     ];
 
-    for (const r of records.reverse()) {
-      const time = r.timestamp.slice(11, 19); // HH:mm:ss
-      const action = (r.action ?? '').slice(0, 7);
-      const market = r.market ?? r.inputToken ?? '';
-      const amount = r.inputAmount != null ? formatUsd(r.inputAmount) : '—';
-      const statusColor = r.status === 'confirmed' ? ok(r.status)
-        : r.status === 'failed' || r.status === 'blocked' ? err(r.status)
-        : r.status === 'inconsistent' ? chalk.red(r.status)
-        : dim(r.status);
-      const tx = r.txHash ? r.txHash.slice(0, 12) + '...' : dim('—');
+    for (const r of display.reverse()) {
+      const time = r.timestamp.slice(11, 19);
+      const action = (r.action ?? '').replace(/_/g, ' ').replace(/position/g, 'pos');
+      const market = r.market ?? '';
+      const side = r.side ?? '';
 
-      lines.push(`  ${dim(time)} ${pad(action, 8)} ${pad(market, 10)} ${pad(amount, 12)} ${pad(statusColor, 12)} ${tx}`);
+      let statusStr: string;
+      if (r.status === 'confirmed') {
+        statusStr = chalk.green('✓ confirmed');
+      } else if (r.status === 'failed') {
+        statusStr = chalk.red('✗ failed');
+      } else if (r.status === 'blocked') {
+        statusStr = chalk.yellow('⊘ blocked');
+      } else if (r.status === 'inconsistent') {
+        statusStr = chalk.red('⚠ inconsistent');
+      } else {
+        statusStr = dim(r.status);
+      }
+
+      const tx = r.txHash ? r.txHash.slice(0, 14) + '...' : dim('—');
+
+      lines.push(`  ${dim(time)} ${pad(action, 14)} ${pad(market, 8)} ${pad(side, 6)} ${statusStr.padEnd(14)} ${tx}`);
+    }
+
+    // Explain inconsistent entries if any
+    const inconsistent = display.filter(r => r.status === 'inconsistent');
+    if (inconsistent.length > 0) {
+      lines.push('');
+      lines.push(`  ${chalk.yellow('Note:')} ${dim('"inconsistent" means the on-chain state after')}`);
+      lines.push(`  ${dim('execution did not match the expected result.')}`);
+      lines.push(`  ${dim('This can happen when a position was already modified')}`);
+      lines.push(`  ${dim('by another transaction (e.g., liquidation, duplicate).')}`);
     }
 
     lines.push('');
