@@ -103,8 +103,13 @@ async function main(): Promise<void> {
   // Apply selected mode to config (mutable override)
   config.simulationMode = selectedMode === 'simulation';
 
-  // Initialize execution engine with final config
-  const execution = new ExecutionEngine(config, state, api, wallet, txPipeline, rpcManager);
+  // Initialize SDK with real wallet keypair (if connected)
+  if (wallet.isConnected && wallet.keypair) {
+    sdkService.init(wallet.keypair);
+  }
+
+  // Initialize execution engine with final config + SDK service
+  const execution = new ExecutionEngine(config, state, api, wallet, txPipeline, rpcManager, sdkService);
   const router = new CommandRouter(execution);
 
   // Interactive REPL
