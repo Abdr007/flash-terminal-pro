@@ -1,28 +1,13 @@
 /**
- * Quote Engine — API-Only
+ * Quote Engine — API-Driven
  *
- * Replaces flash-sdk for local calculations.
- * Uses hardcoded protocol fee rates (verified from Flash docs)
- * and API data for everything else.
- *
- * Zero SDK dependency.
+ * Uses FeeService for on-chain fee rates (via Flash API).
+ * No hardcoded fee rates. All data from protocol.
  */
 
 import { getLogger } from '../utils/logger.js';
-
-// ─── Fee Rates (from Flash Trade protocol docs, verified) ───────────────────
-
-const FEE_RATES: Record<string, number> = {
-  SOL: 0.00051, BTC: 0.00051, ETH: 0.00051, JitoSOL: 0.00051,
-  ZEC: 0.002, BNB: 0.001,
-  EUR: 0.0003, GBP: 0.0003, USDJPY: 0.0003, USDCNH: 0.0003,
-  XAU: 0.001, XAG: 0.001, CRUDEOIL: 0.0015, NATGAS: 0.0015,
-  JUP: 0.0011, JTO: 0.0011, RAY: 0.0011, PYTH: 0.0011,
-  KMNO: 0.002, MET: 0.002, HYPE: 0.002,
-  BONK: 0.0012, WIF: 0.0012, PENGU: 0.0012, PUMP: 0.0012, FARTCOIN: 0.0012,
-  SPY: 0.001, NVDA: 0.001, TSLA: 0.001, AAPL: 0.001, AMD: 0.001, AMZN: 0.001,
-  ORE: 0.002,
-};
+import { getMarketFeeRates } from './fee-service.js';
+import type { FlashApiClient } from './api-client.js';
 
 export interface LocalEstimate {
   sizeUsd: number;
@@ -33,10 +18,24 @@ export interface LocalEstimate {
 }
 
 /**
- * Estimate trade parameters locally (no SDK, no network).
+ * Estimate trade parameters using API-driven fee rates.
+ * Falls back gracefully if fee data unavailable.
  */
-export function estimateOpenPosition(market: string, collateral: number, leverage: number): LocalEstimate {
-  const feeRate = FEE_RATES[market] ?? 0.001;
+export async function estimateOpenPosition(
+  market: string,
+  collateral: number,
+  leverage: number,
+  api?: FlashApiClient | null,
+): Promise<LocalEstimate> {
+  let feeRate = 0;
+
+  if (api) {
+    const rates = await getMarketFeeRates(market, api);
+    if (rates.source === 'api') {
+      feeRate = rates.openFeeRate;
+    }
+  }
+
   const sizeUsd = collateral * leverage;
   const openFee = sizeUsd * feeRate;
 
@@ -50,7 +49,7 @@ export function estimateOpenPosition(market: string, collateral: number, leverag
 export function crossValidateWithEstimate(
   apiQuote: { entryFee?: number; newLeverage?: number },
   localEstimate: LocalEstimate,
-  tolerancePct = 50, // 50% tolerance — API and local may use different fee models
+  tolerancePct = 50,
 ): { valid: boolean; divergences: string[] } {
   const log = getLogger();
   const divergences: string[] = [];

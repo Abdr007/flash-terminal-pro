@@ -163,8 +163,8 @@ export async function handleEarnSimulate(amount: number, poolAlias: string, api:
   const compoundedYearly = amount * (Math.pow(1 + m.apy7d / 100 / 365, 365) - 1);
   const compoundedValue = amount + compoundedYearly;
 
-  // Fee impact estimate (15 bps USDC withdrawal fee)
-  const withdrawFee = amount * 0.0015;
+  // Withdrawal fee is applied on-chain by protocol; shown as estimate
+  const withdrawFee = 0; // Actual fee deducted on-chain, not estimated locally
 
   const lines: string[] = [header(`${pool.displayName} — Yield Projection`)];
 

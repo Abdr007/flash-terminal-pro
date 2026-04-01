@@ -462,8 +462,8 @@ export class ExecutionEngine implements IExecutionEngine {
       return { success: false, error: lines.join('\n') };
     }
 
-    // ─── LOCAL ESTIMATE (no SDK) ───────────────────────────────────────
-    const localEst = estimateOpenPosition(market, collateral, leverage);
+    // ─── LOCAL ESTIMATE (API-driven fees) ──────────────────────────────
+    const localEst = await estimateOpenPosition(market, collateral, leverage, this.api);
     const estFee = localEst.openFee;
 
     const lines = [
