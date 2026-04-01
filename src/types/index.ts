@@ -130,7 +130,15 @@ export enum Action {
   SystemStatus = 'system_status',
   SystemMetrics = 'system_metrics',
   TxMetrics = 'tx_metrics',
-  EarnIntegrations = 'earn_integrations',
+  // Removed: EarnIntegrations
+  TxInspect = 'tx_inspect',
+  TxDebug = 'tx_debug',
+  ProtocolVerify = 'protocol_verify',
+  RpcAdd = 'rpc_add',
+  RpcRemove = 'rpc_remove',
+  RpcSet = 'rpc_set',
+  RpcTest = 'rpc_test',
+  RpcList = 'rpc_list',
 
   // Utilities
   Degen = 'degen',

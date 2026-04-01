@@ -280,8 +280,20 @@ export class ExecutionEngine implements IExecutionEngine {
         return this.handleHealth();
       case Action.TxMetrics:
         return this.handleStats();
-      case Action.EarnIntegrations:
-        return this.handleEarnIntegrations();
+      case Action.TxInspect:
+      case Action.TxDebug:
+        return { success: true, error: command.params.value
+          ? `\n  ${dim('View on Solscan:')}\n  https://solscan.io/tx/${command.params.value}\n`
+          : dim('\n  Usage: tx inspect <signature>\n') };
+      case Action.ProtocolVerify:
+        return this.handleDoctor();
+      case Action.RpcAdd:
+      case Action.RpcRemove:
+      case Action.RpcSet:
+        return { success: true, error: dim(`\n  RPC ${command.action.replace('rpc_', '')}: set RPC_URL or RPC_BACKUP_URL in .env file.\n  Restart CLI to apply changes.\n`) };
+      case Action.RpcTest:
+      case Action.RpcList:
+        return this.handleHealth();
       case Action.Dryrun:
         return { success: true, error: dim('\n  Dryrun: use simulation mode (select mode 1 on startup).\n  All commands in simulation show previews without executing.\n') };
 
@@ -1531,26 +1543,6 @@ export class ExecutionEngine implements IExecutionEngine {
     };
   }
 
-  private handleEarnIntegrations(): TxResult {
-    return {
-      success: true,
-      error: [
-        '',
-        `  ${accentBold('FLP INTEGRATION PARTNERS')}`,
-        `  ${dim('─'.repeat(48))}`,
-        '',
-        `  ${chalk.cyan('Loopscale')}    Leverage yield up to 5x on FLP`,
-        `  ${chalk.cyan('Carrot')}       Boost FLP.1 yields with 3.4x leverage`,
-        `  ${chalk.cyan('RateX')}        Trade FLP.1 yield with 10x margin`,
-        `  ${chalk.cyan('Kamino')}       Borrow against FLP.1 (75% LTV)`,
-        '',
-        `  ${dim('These protocols accept Flash Trade FLP tokens.')}`,
-        `  ${dim('Visit each platform for current terms.')}`,
-        `  ${dim('─'.repeat(48))}`,
-        '',
-      ].join('\n'),
-    };
-  }
 
   private async handleDoctor(): Promise<TxResult> {
     const lines = [

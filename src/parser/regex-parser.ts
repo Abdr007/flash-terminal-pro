@@ -489,8 +489,28 @@ const viewPatterns: PatternMatcher[] = [
     if (/^(?:system\s+metrics|metrics)$/i.test(input)) return cmd(Action.SystemMetrics, flags, raw);
     if (/^(?:tx\s+metrics|engine\s+status)$/i.test(input)) return cmd(Action.TxMetrics, flags, raw);
     if (/^(?:trade\s+history)$/i.test(input)) return cmd(Action.ViewTrades, flags, raw);
-    if (/^(?:earn\s+integrations?)$/i.test(input)) return cmd(Action.EarnIntegrations, flags, raw);
     if (/^(?:dryrun|dry-run)\s+(.+)/i.test(input)) return cmd(Action.Dryrun, { ...flags, value: input.replace(/^(?:dryrun|dry-run)\s+/i, '') }, raw);
+
+    // TX inspection
+    if (/^tx\s+inspect\s+(\S+)/i.test(input)) {
+      const m = input.match(/^tx\s+inspect\s+(\S+)/i)!;
+      return cmd(Action.TxInspect, { ...flags, value: m[1] }, raw);
+    }
+    if (/^tx\s+debug\s+(\S+)/i.test(input)) {
+      const m = input.match(/^tx\s+debug\s+(\S+)/i)!;
+      return cmd(Action.TxDebug, { ...flags, value: m[1] }, raw);
+    }
+
+    // Protocol
+    if (/^(?:protocol\s+verify|source\s+verify)$/i.test(input)) return cmd(Action.ProtocolVerify, flags, raw);
+
+    // RPC management
+    if (/^rpc\s+add\s+(\S+)/i.test(input)) return cmd(Action.RpcAdd, { ...flags, value: input.match(/\S+$/)?.[0] }, raw);
+    if (/^rpc\s+remove\s+(\S+)/i.test(input)) return cmd(Action.RpcRemove, { ...flags, value: input.match(/\S+$/)?.[0] }, raw);
+    if (/^rpc\s+set\s+(\S+)/i.test(input)) return cmd(Action.RpcSet, { ...flags, value: input.match(/\S+$/)?.[0] }, raw);
+    if (/^rpc\s+test$/i.test(input)) return cmd(Action.RpcTest, flags, raw);
+    if (/^rpc\s+list$/i.test(input)) return cmd(Action.RpcList, flags, raw);
+    if (/^(?:leaderboard|whale\s+activity)$/i.test(input)) return cmd(Action.ViewLiquidations, flags, raw); // routes to NOT SUPPORTED
 
     // Utilities
     if (/^degen$/i.test(input)) return cmd(Action.Degen, flags, raw);
