@@ -83,13 +83,11 @@ export async function selectMode(
 
     switch (choice) {
       case '1': {
-        // Live mode
-        if (!wallet.isConnected) {
-          const connected = await interactiveWalletSetup(config, wallet);
-          if (!connected) {
-            console.log(MUTED('  No wallet connected. Falling back to simulation.'));
-            return showSimBanner(config);
-          }
+        // Live mode — always show wallet picker (matching flash-terminal)
+        const connected = await interactiveWalletSetup(config, wallet);
+        if (!connected) {
+          console.log(MUTED('  No wallet connected. Falling back to simulation.'));
+          return showSimBanner(config);
         }
         const validation = validateLiveMode(config, wallet);
         if (!validation.valid) {
@@ -113,14 +111,17 @@ export async function selectMode(
 
 // ─── Live Banner (matching flash-terminal) ──────────────────────────────────
 
-async function showLiveBanner(config: FlashXConfig, wallet: WalletManager): Promise<SelectedMode> {
+async function showLiveBanner(config: FlashXConfig, wallet: WalletManager, walletName?: string): Promise<SelectedMode> {
+  const store = new WalletStore();
+  const displayName = walletName ?? store.getDefault() ?? wallet.shortAddress;
+
   console.log('');
   console.log(`  ${ACCENT_BOLD('FLASH TERMINAL PRO')}`);
   console.log(`  ${MUTED('─'.repeat(32))}`);
   console.log('');
   console.log(`  ${chalk.bgRed.white.bold(' LIVE TRADING ')}`);
   console.log('');
-  console.log(`  ${MUTED('Wallet'.padEnd(18))}${CMD(wallet.shortAddress)}`);
+  console.log(`  ${MUTED('Wallet'.padEnd(18))}${CMD(displayName)}`);
   if (wallet.publicKey) {
     console.log(`  ${MUTED('Address'.padEnd(18))}${MUTED(wallet.publicKey.toBase58())}`);
   }
@@ -265,7 +266,37 @@ async function detectAndConnectWallet(config: FlashXConfig, wallet: WalletManage
 async function interactiveWalletSetup(config: FlashXConfig, wallet: WalletManager): Promise<boolean> {
   const store = new WalletStore();
   const names = store.list();
+  const defaultName = store.getDefault();
 
+  // If wallet already connected (auto-detected), offer to keep it
+  if (wallet.isConnected && defaultName) {
+    console.log('');
+    console.log(chalk.bold('  Saved Wallets'));
+    console.log(MUTED('  ────────────'));
+    console.log('');
+    console.log(`    ${CMD('1)')} Use previous wallet ${MUTED(`(${defaultName})`)}`);
+    console.log(`    ${CMD('2)')} Select another saved wallet`);
+    console.log(`    ${CMD('3)')} Import new wallet`);
+    console.log(`    ${CMD('4)')} Create new wallet`);
+    console.log('');
+
+    const choice = await ask(`  ${chalk.yellow('>')} `);
+
+    if (choice === '1') {
+      console.log(chalk.green(`\n  Wallet connected: ${defaultName}`));
+      return true;
+    }
+    if (choice === '2' && names.length > 1) {
+      return showWalletPicker(names, defaultName, store, wallet);
+    }
+    if (choice === '3' || choice === '2') {
+      return importWalletFlow(config, store, wallet);
+    }
+    // choice 4 or default — fall through to import
+    return importWalletFlow(config, store, wallet);
+  }
+
+  // No wallet connected — show picker if wallets exist
   if (names.length > 0) {
     console.log('');
     console.log(chalk.bold('  Saved Wallets'));
@@ -287,6 +318,7 @@ async function interactiveWalletSetup(config: FlashXConfig, wallet: WalletManage
         const entry = store.get(names[idx]);
         if (entry) {
           wallet.loadFromFile(entry.path);
+          store.setDefault(names[idx]);
           console.log(chalk.green(`\n  Wallet connected: ${names[idx]}`));
           return true;
         }
@@ -294,6 +326,35 @@ async function interactiveWalletSetup(config: FlashXConfig, wallet: WalletManage
     }
   }
 
+  return importWalletFlow(config, store, wallet);
+}
+
+async function showWalletPicker(names: string[], defaultName: string, store: WalletStore, wallet: WalletManager): Promise<boolean> {
+  console.log('');
+  for (let i = 0; i < names.length; i++) {
+    const entry = store.get(names[i]);
+    const addr = entry ? `${entry.address.slice(0, 4)}...${entry.address.slice(-4)}` : '';
+    const tag = names[i] === defaultName ? MUTED(' (current)') : '';
+    console.log(`    ${CMD(String(i + 1) + ')')} ${names[i]} ${MUTED(`(${addr})`)}${tag}`);
+  }
+  console.log('');
+  const choice = await ask(`  ${chalk.yellow('>')} `);
+  const idx = parseInt(choice, 10) - 1;
+  if (idx >= 0 && idx < names.length) {
+    try {
+      const entry = store.get(names[idx]);
+      if (entry) {
+        wallet.loadFromFile(entry.path);
+        store.setDefault(names[idx]);
+        console.log(chalk.green(`\n  Wallet connected: ${names[idx]}`));
+        return true;
+      }
+    } catch { /* fall through */ }
+  }
+  return false;
+}
+
+async function importWalletFlow(config: FlashXConfig, store: WalletStore, wallet: WalletManager): Promise<boolean> {
   console.log(MUTED('\n  Enter path to keypair JSON file:'));
   const path = await ask(`  ${MUTED('Path:')} `);
   if (!path) return false;
