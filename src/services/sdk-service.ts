@@ -374,9 +374,14 @@ export class SdkService {
   }
 
   /**
-   * Build earn withdraw by percentage — matching flash-terminal's unstakeFLP.
-   * Reads staked balance from FlpStakeAccount PDA, calculates amount from %.
-   * Multi-step: unstake → withdraw → removeLiquidity
+   * Build earn withdraw by percentage — matching flash-terminal's removeLiquidity.
+   *
+   * Flow (exactly matching flash-terminal):
+   *   1. Check compounding FLP token balance (from earn deposit)
+   *   2. If zero, check raw LP token balance (from unstake → withdrawStake)
+   *   3. Calculate withdrawAmount = balance * percent / 100
+   *   4. Use removeCompoundingLiquidity for compounding FLP
+   *   5. Use removeLiquidity for raw LP tokens
    */
   async buildEarnWithdrawPercent(
     keypair: Keypair,
@@ -391,51 +396,63 @@ export class SdkService {
     if (!pc) { log.error('SDK', `Pool ${poolName} not found`); return null; }
 
     try {
-      const { PublicKey } = await import('@solana/web3.js');
       const { BN } = await import('@coral-xyz/anchor');
+      const { getAssociatedTokenAddress, getAccount } = await import('@solana/spl-token');
 
-      // Read staked balance from FlpStakeAccount PDA
-      const [flpStakePda] = PublicKey.findProgramAddressSync(
-        [Buffer.from('stake'), keypair.publicKey.toBuffer(), pc.poolAddress.toBuffer()],
-        pc.programId,
-      );
-      const stakeAccountInfo = await this.connection.getAccountInfo(flpStakePda);
-      if (!stakeAccountInfo) {
-        log.error('SDK', 'No staked FLP position found');
-        return null;
-      }
-
-      const decoded = this.client.program.coder.accounts.decode('flpStake', stakeAccountInfo.data) as {
-        stakeStats: { activeAmount: typeof BN.prototype; pendingActivation: typeof BN.prototype; deactivatedAmount: typeof BN.prototype };
+      // Helper: get token balance as BN
+      const getTokenBal = async (mint: import('@solana/web3.js').PublicKey): Promise<import('@coral-xyz/anchor').BN> => {
+        try {
+          const ata = await getAssociatedTokenAddress(mint, keypair.publicKey);
+          const account = await getAccount(this.connection!, ata);
+          return new BN(account.amount.toString());
+        } catch {
+          return new BN(0);
+        }
       };
-      const activeAmount = decoded.stakeStats.activeAmount;
-      const pendingActivation = decoded.stakeStats.pendingActivation;
-      const totalStaked = activeAmount.add(pendingActivation);
 
-      if (totalStaked.isZero()) {
-        log.error('SDK', 'No staked FLP to withdraw');
+      // 1. Check compounding FLP balance (from earn deposit)
+      const flpMint = pc.compoundingTokenMint;
+      let flpBalance = await getTokenBal(flpMint);
+      let useRawLp = false;
+
+      // 2. If zero, check raw LP tokens (from unstake → withdrawStake)
+      if (flpBalance.isZero()) {
+        const rawLpMint = pc.stakedLpTokenMint;
+        flpBalance = await getTokenBal(rawLpMint);
+        if (flpBalance.isZero()) {
+          log.error('SDK', 'No FLP tokens found in wallet. Add liquidity first.');
+          return null;
+        }
+        useRawLp = true;
+        log.info('SDK', `Found raw LP tokens from previous unstake`);
+      }
+
+      // 3. Calculate withdraw amount
+      const withdrawAmount = flpBalance.mul(new BN(Math.floor(percent))).div(new BN(100));
+      if (withdrawAmount.isZero()) {
+        log.error('SDK', `${percent}% of FLP balance rounds to zero`);
         return null;
       }
 
-      // Calculate unstake amount from percentage
-      const unstakeAmount = totalStaked.mul(new BN(Math.floor(percent))).div(new BN(100));
-      log.info('SDK', `Withdraw ${percent}%: ${unstakeAmount.toString()} of ${totalStaked.toString()} staked`);
+      log.info('SDK', `Withdraw ${percent}%: ${withdrawAmount.toString()} of ${flpBalance.toString()} FLP (rawLp=${useRawLp})`);
 
-      // Step 1: Unstake instant
-      const unstakeResult = await this.client.unstakeInstant(
-        'USDC',
-        unstakeAmount,
-        pc,
-      );
+      // 4. Build transaction
+      let result: { instructions: TransactionInstruction[]; additionalSigners: Signer[] };
+      if (useRawLp) {
+        // Raw LP tokens — use removeLiquidity
+        result = await this.client.removeLiquidity('USDC', withdrawAmount, BN_ZERO, pc, true, true);
+      } else {
+        // Compounding FLP — use removeCompoundingLiquidity
+        result = await this.client.removeCompoundingLiquidity(
+          withdrawAmount,
+          BN_ZERO,
+          'USDC',
+          flpMint,
+          pc,
+        );
+      }
 
-      // Step 2: Withdraw stake
-      const withdrawResult = await this.client.withdrawStake(pc, false, true, true);
-
-      // Combine into single tx: unstake + withdraw
-      const combinedIxs = [...unstakeResult.instructions, ...withdrawResult.instructions];
-      const combinedSigners = [...unstakeResult.additionalSigners, ...withdrawResult.additionalSigners];
-
-      return this.buildTx(combinedIxs, combinedSigners, keypair, pc);
+      return this.buildTx(result.instructions, result.additionalSigners, keypair, pc);
     } catch (e) {
       log.error('SDK', `Earn withdraw failed: ${e instanceof Error ? e.message : String(e)}`);
       return null;
