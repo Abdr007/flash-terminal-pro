@@ -1862,7 +1862,7 @@ export class ExecutionEngine implements IExecutionEngine {
       'fees':       `  ${dim('Next:')} volume ${dim('│')} earn ${dim('│')} dashboard`,
       'oi':         `  ${dim('Next:')} funding SOL ${dim('│')} volume ${dim('│')} risk`,
       'funding':    `  ${dim('Next:')} open interest ${dim('│')} risk ${dim('│')} positions`,
-      'faf':        `  ${dim('Next:')} faf stake <amt> ${dim('│')} faf claim ${dim('│')} faf tier`,
+      'faf':        '',
       'wallet':     `  ${dim('Next:')} wallet tokens ${dim('│')} wallet list ${dim('│')} dashboard`,
       'doctor':     `  ${dim('Next:')} health ${dim('│')} dashboard ${dim('│')} rpc`,
       'tokens':     `  ${dim('Next:')} allocation ${dim('│')} dashboard ${dim('│')} long SOL ...`,
