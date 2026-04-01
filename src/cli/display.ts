@@ -1,8 +1,12 @@
 /**
- * Rich Display Module
+ * Display System — Futuristic Minimal Terminal
  *
- * Professional terminal formatting matching Flash Terminal quality.
- * Reusable components for tables, headers, sections, bars.
+ * Design principles:
+ *   - Whitespace over borders
+ *   - Bold values, dim labels
+ *   - Semantic colors (green=profit, red=loss, yellow=warn, cyan=info)
+ *   - Compact vertical space
+ *   - Subtle symbols (● ○ ▲ ▼)
  */
 
 import chalk from 'chalk';
@@ -10,55 +14,57 @@ import chalk from 'chalk';
 // ─── Layout ─────────────────────────────────────────────────────────────────
 
 export function header(title: string): string {
-  return `\n  ${chalk.cyan.bold(title)}\n  ${chalk.dim('─'.repeat(52))}\n`;
-}
-
-export function subheader(title: string): string {
-  return `  ${chalk.dim(title)}`;
-}
-
-export function divider(): string {
-  return `  ${chalk.dim('─'.repeat(52))}`;
-}
-
-export function section(title: string): string {
   return `\n  ${chalk.white.bold(title)}`;
 }
 
-export function kv(key: string, value: string, keyWidth = 14): string {
-  return `  ${chalk.dim(key.padEnd(keyWidth))} ${value}`;
+export function subline(text: string): string {
+  return `  ${chalk.dim(text)}`;
 }
 
-export function kvBold(key: string, value: string, keyWidth = 14): string {
-  return `  ${chalk.dim(key.padEnd(keyWidth))} ${chalk.white.bold(value)}`;
+export function divider(): string {
+  return `  ${chalk.dim('·'.repeat(50))}`;
 }
 
-export function kvColor(key: string, value: string, color: 'green' | 'red' | 'yellow' | 'cyan', keyWidth = 14): string {
-  const colorFn = color === 'green' ? chalk.green : color === 'red' ? chalk.red : color === 'yellow' ? chalk.yellow : chalk.cyan;
-  return `  ${chalk.dim(key.padEnd(keyWidth))} ${colorFn(value)}`;
+export function section(title: string): string {
+  return `\n  ${chalk.dim.bold(title)}`;
+}
+
+export function spacer(): string {
+  return '';
+}
+
+// ─── Key-Value ──────────────────────────────────────────────────────────────
+
+export function kv(key: string, value: string, keyWidth = 16): string {
+  return `  ${chalk.dim(key.padEnd(keyWidth))}${value}`;
+}
+
+export function kvBold(key: string, value: string, keyWidth = 16): string {
+  return `  ${chalk.dim(key.padEnd(keyWidth))}${chalk.white.bold(value)}`;
+}
+
+export function kvColor(key: string, value: string, color: 'green' | 'red' | 'yellow' | 'cyan', keyWidth = 16): string {
+  const fn = color === 'green' ? chalk.green : color === 'red' ? chalk.red : color === 'yellow' ? chalk.yellow : chalk.cyan;
+  return `  ${chalk.dim(key.padEnd(keyWidth))}${fn(value)}`;
 }
 
 // ─── Bars ───────────────────────────────────────────────────────────────────
 
-export function progressBar(value: number, max: number, width = 20, color: 'green' | 'red' | 'yellow' | 'cyan' = 'green'): string {
-  const filled = Math.min(Math.round((value / max) * width), width);
-  const empty = width - filled;
-  const colorFn = color === 'green' ? chalk.green : color === 'red' ? chalk.red : color === 'yellow' ? chalk.yellow : chalk.cyan;
-  return colorFn('█'.repeat(filled)) + chalk.dim('░'.repeat(empty));
+export function progressBar(pct: number, width = 16): string {
+  const filled = Math.min(Math.round((pct / 100) * width), width);
+  return chalk.cyan('▓'.repeat(filled)) + chalk.dim('░'.repeat(width - filled));
 }
 
-export function allocBar(pct: number, width = 20): string {
+export function allocBar(pct: number, width = 16): string {
   const filled = Math.min(Math.round((pct / 100) * width), width);
-  const color = pct > 50 ? chalk.green : pct > 20 ? chalk.cyan : chalk.dim;
-  return color('█'.repeat(filled)) + chalk.dim('░'.repeat(width - filled));
+  const color = pct > 60 ? chalk.green : pct > 25 ? chalk.cyan : chalk.dim;
+  return color('▓'.repeat(filled)) + chalk.dim('░'.repeat(width - filled));
 }
 
 // ─── Tables ─────────────────────────────────────────────────────────────────
 
 export function tableHeader(cols: { label: string; width: number }[]): string {
-  const row = cols.map(c => chalk.dim(c.label.padEnd(c.width))).join(' ');
-  const line = chalk.dim('─'.repeat(cols.reduce((s, c) => s + c.width + 1, 0)));
-  return `  ${row}\n  ${line}`;
+  return `  ${chalk.dim(cols.map(c => c.label.padEnd(c.width)).join(' '))}`;
 }
 
 export function tableRow(values: string[], widths: number[]): string {
@@ -84,28 +90,30 @@ export function price(n: number): string {
 }
 
 export function pnl(n: number): string {
-  const s = usd(n);
-  return n > 0 ? chalk.green('+' + s) : n < 0 ? chalk.red(s) : chalk.dim(s);
+  const s = usd(Math.abs(n));
+  if (n > 0) return chalk.green(`▲ +${s}`);
+  if (n < 0) return chalk.red(`▼ -${s}`);
+  return chalk.dim(`— ${s}`);
 }
 
 export function side(s: string): string {
-  return s.toUpperCase() === 'LONG' ? chalk.green(s) : chalk.red(s);
+  return s.toUpperCase() === 'LONG' ? chalk.green('LONG') : chalk.red('SHORT');
 }
 
 export function status(ok: boolean, label?: string): string {
-  return ok ? chalk.green(label ?? 'OK') : chalk.red(label ?? 'FAIL');
+  return ok ? chalk.green(`● ${label ?? 'OK'}`) : chalk.red(`○ ${label ?? 'FAIL'}`);
 }
 
 export function warning(msg: string): string {
-  return `  ${chalk.yellow('⚠')} ${msg}`;
+  return `  ${chalk.yellow('▲')} ${chalk.yellow(msg)}`;
 }
 
 export function success(msg: string): string {
-  return `  ${chalk.green('✓')} ${msg}`;
+  return `  ${chalk.green('●')} ${msg}`;
 }
 
 export function error(msg: string): string {
-  return `  ${chalk.red('✗')} ${msg}`;
+  return `  ${chalk.red('●')} ${msg}`;
 }
 
 export function dim(msg: string): string {
@@ -113,5 +121,9 @@ export function dim(msg: string): string {
 }
 
 export function link(url: string): string {
-  return chalk.dim(url);
+  return chalk.dim.underline(url);
+}
+
+export function hint(next: string): string {
+  return `  ${chalk.dim('→')} ${chalk.dim(next)}`;
 }
