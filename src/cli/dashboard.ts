@@ -42,7 +42,7 @@ export async function renderDashboard(
   const totalValue = walletTotal + posCollateral + posPnl;
 
   // ─── Header ─────────────────────────────────────────────
-  lines.push(titleBlock('FLASH TERMINAL PRO', 52));
+  lines.push(titleBlock('FLASH TERMINAL', 52));
   lines.push('');
   lines.push(kv('Wallet', wallet.isConnected ? chalk.white(wallet.shortAddress) : chalk.yellow('Not connected')));
   lines.push(kv('Network', dim('mainnet-beta')));

@@ -2046,7 +2046,7 @@ export class ExecutionEngine implements IExecutionEngine {
 
     const lines = [
       '',
-      `  ${accentBold('FLASH TERMINAL PRO')}  ${dim('— Command Reference')}`,
+      `  ${accentBold('FLASH TERMINAL')}  ${dim('— Command Reference')}`,
       `  ${dim('─'.repeat(52))}`,
       '',
       // Category order matches flash-terminal: Trading, Earn, FAF, Market Data, Portfolio, Protocol, Wallet, Utilities

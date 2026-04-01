@@ -57,7 +57,7 @@ export async function selectMode(
 
   // ─── Banner (matching flash-terminal) ───────────────────────────
   console.log('');
-  console.log(`  ${ACCENT_BOLD('FLASH TERMINAL PRO')}`);
+  console.log(`  ${ACCENT_BOLD('FLASH TERMINAL')}`);
   console.log(`  ${MUTED('─'.repeat(32))}`);
   console.log('');
   console.log(MUTED('  Trading Interface for Flash Trade'));
@@ -116,16 +116,16 @@ async function showLiveBanner(config: FlashXConfig, wallet: WalletManager, walle
   const displayName = walletName ?? store.getDefault() ?? wallet.shortAddress;
 
   console.log('');
-  console.log(`  ${ACCENT_BOLD('FLASH TERMINAL PRO')}`);
-  console.log(`  ${MUTED('─'.repeat(32))}`);
+  console.log(chalk.red.bold('  \u26A1 FLASH TERMINAL \u26A1'));
+  console.log(chalk.red('  ' + '\u2501'.repeat(24)));
   console.log('');
-  console.log(`  ${chalk.bgRed.white.bold(' LIVE TRADING ')}`);
+  console.log(chalk.bgRed.white.bold(' LIVE TRADING MODE '));
   console.log('');
-  console.log(`  ${MUTED('Wallet'.padEnd(18))}${CMD(displayName)}`);
+  console.log(`  Wallet:  ${chalk.cyan(displayName)}`);
   if (wallet.publicKey) {
-    console.log(`  ${MUTED('Address'.padEnd(18))}${MUTED(wallet.publicKey.toBase58())}`);
+    console.log(`  Address: ${MUTED(wallet.publicKey.toBase58().slice(0, 4) + '...' + wallet.publicKey.toBase58().slice(-4))}`);
   }
-  console.log(`  ${MUTED('Network'.padEnd(18))}${chalk.white(config.network)}`);
+  console.log(`  Network: ${chalk.bold(config.network)}`);
   console.log('');
 
   // Balances
@@ -185,18 +185,10 @@ async function showLiveBanner(config: FlashXConfig, wallet: WalletManager, walle
 
   console.log('');
   console.log(chalk.yellow('  WARNING'));
-  console.log(MUTED('  Transactions executed here are real.'));
+  console.log(chalk.dim('  Transactions executed here are real.'));
   console.log('');
-
-  // Quick Start
-  console.log(chalk.bold('  Quick Start'));
-  console.log(`    ${CMD('help')}           List all commands`);
-  console.log(`    ${CMD('dashboard')}      Protocol & portfolio overview`);
-  console.log(`    ${CMD('monitor')}        Live market monitoring`);
-  console.log(`    ${CMD('wallet tokens')}  View token balances`);
-  console.log(`    ${CMD('markets')}        View available markets`);
-  console.log('');
-  console.log(MUTED('  Type "exit" to close the terminal.'));
+  console.log(chalk.dim('  Type "help" for commands.'));
+  console.log(chalk.dim('  Type "exit" to close the terminal.'));
   console.log('');
 
   getLogger().info('MODE', `Live mode activated — wallet: ${wallet.shortAddress}`);
@@ -207,19 +199,15 @@ async function showLiveBanner(config: FlashXConfig, wallet: WalletManager, walle
 
 function showSimBanner(_config: FlashXConfig): SelectedMode {
   console.log('');
-  console.log(`  ${ACCENT_BOLD('FLASH TERMINAL PRO')}`);
-  console.log(`  ${MUTED('─'.repeat(32))}`);
+  console.log(chalk.yellow.bold('  \u26A1 FLASH TERMINAL \u26A1'));
+  console.log(chalk.yellow('  ' + '\u2501'.repeat(24)));
   console.log('');
-  console.log(`  ${chalk.bgYellow.black.bold(' SIMULATION ')}`);
+  console.log(chalk.bgYellow.black(' SIMULATION MODE '));
   console.log('');
-  console.log(MUTED('  Trades are simulated. No real transactions.'));
+  console.log(chalk.dim('  Trades are simulated. No real transactions.'));
   console.log('');
-  console.log(chalk.bold('  Quick Start'));
-  console.log(`    ${CMD('help')}           List all commands`);
-  console.log(`    ${CMD('dashboard')}      Protocol & portfolio overview`);
-  console.log(`    ${CMD('markets')}        View available markets`);
-  console.log('');
-  console.log(MUTED('  Type "exit" to close the terminal.'));
+  console.log(chalk.dim('  Type "help" for commands.'));
+  console.log(chalk.dim('  Type "exit" to close the terminal.'));
   console.log('');
 
   return 'simulation';
