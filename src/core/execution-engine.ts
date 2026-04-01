@@ -31,7 +31,7 @@ import type { RpcManager } from '../services/rpc-manager.js';
 import { resolvePool } from '../services/pool-resolver.js';
 import { estimateOpenPosition, crossValidateWithEstimate } from '../services/quote-engine.js';
 import { getAuditLog } from '../security/audit-log.js';
-import { renderDashboard, renderWalletTokens } from '../cli/dashboard.js';
+import { renderDashboard } from '../cli/dashboard.js';
 import { renderPnl, renderExposure, renderRisk } from '../cli/analytics.js';
 import {
   handleEarnOverview, handleEarnInfo, handleEarnBest, handleEarnSimulate,
@@ -45,7 +45,10 @@ import {
   handleFafRequests,
 } from '../faf/faf-handlers.js';
 import { handleVolume, handleOpenInterest, handleFunding, handleFees, handleNotSupported } from '../cli/market-analytics.js';
-import { handleWalletStatus, handleWalletList, handleWalletUse, handleWalletDisconnect } from '../cli/wallet-commands.js';
+import {
+  handleWalletStatus, handleWalletTokens as walletTokensCmd, handleWalletBalance,
+  handleWalletList, handleWalletUse, handleWalletConnect, handleWalletDisconnect, handleWalletAddress,
+} from '../cli/wallet-commands.js';
 import { StateConsistency } from './state-consistency.js';
 import { getMetrics } from './metrics.js';
 import { ErrorCode } from '../types/errors.js';
@@ -204,7 +207,8 @@ export class ExecutionEngine implements IExecutionEngine {
       case Action.ViewPools:
         return this.handleViewPools();
       case Action.ViewBalance:
-        return this.handleViewBalance();
+      case Action.WalletBalance:
+        return handleWalletBalance(this.wallet, this.state);
       case Action.ViewTrades:
         return this.handleTradeHistory();
       case Action.ViewStats:
@@ -224,7 +228,7 @@ export class ExecutionEngine implements IExecutionEngine {
       case Action.ViewDashboard:
         return this.handleDashboard();
       case Action.ViewWalletTokens:
-        return this.handleWalletTokens();
+        return walletTokensCmd(this.wallet, this.state);
       case Action.ViewPnl:
         return { success: true, error: await renderPnl(this.state) };
       case Action.ViewExposure:
@@ -265,13 +269,9 @@ export class ExecutionEngine implements IExecutionEngine {
       case Action.Capital:
         return this.handleCapital();
       case Action.WalletAddress:
-        return { success: true, error: this.wallet.isConnected ? `\n  ${this.wallet.publicKey?.toBase58()}\n` : dim('\n  No wallet connected.\n') };
+        return handleWalletAddress(this.wallet);
       case Action.WalletConnect:
-        if (command.params.path) {
-          try { this.wallet.loadFromFile(command.params.path); return { success: true, error: `\n  ${chalk.green('✓')} Connected: ${this.wallet.shortAddress}\n` }; }
-          catch (e) { return { success: false, error: `  ${e instanceof Error ? e.message : String(e)}` }; }
-        }
-        return handleWalletStatus(this.wallet, this.state);
+        return handleWalletConnect(command.params.path, this.wallet);
       case Action.PositionDebug:
         return this.handleAnalyze(command);
       case Action.SystemHealth:
@@ -373,12 +373,7 @@ export class ExecutionEngine implements IExecutionEngine {
         return { success: true, error: output };
       }
 
-      // ─── Wallet ─────────────────────────────────────────────────────
-      case Action.WalletCreate:
-      case Action.WalletImport:
-      case Action.WalletList:
-      case Action.WalletUse:
-        return { success: true, error: dim('  Wallet management coming in Phase 2') };
+      // Old wallet stubs removed — handled above in Wallet Management section
 
       // ─── System ─────────────────────────────────────────────────────
       case Action.Health:
@@ -1191,37 +1186,6 @@ export class ExecutionEngine implements IExecutionEngine {
     return { success: true, error: lines.join('\n') };
   }
 
-  private async handleViewBalance(): Promise<TxResult> {
-    if (!this.wallet.isConnected) {
-      return { success: true, error: dim('  Wallet not connected. Use mode 2 (Live) to connect wallet.') };
-    }
-
-    const lines = [
-      '',
-      `  ${accentBold('WALLET BALANCE')}`,
-      `  ${dim('─'.repeat(48))}`,
-      '',
-      `  ${dim('Address:')}  ${chalk.white(this.wallet.shortAddress)}`,
-      '',
-    ];
-
-    try {
-      const solBal = await this.state.getBalance('SOL');
-      const usdcBal = await this.state.getBalance('USDC');
-      const solPrice = await this.state.getPrice('SOL');
-      const solUsd = solBal * solPrice;
-
-      lines.push(`  ${dim('SOL:')}     ${chalk.white(solBal.toFixed(4))} ${dim(`($${solUsd.toFixed(2)})`)}`);
-      lines.push(`  ${dim('USDC:')}    ${chalk.white('$' + usdcBal.toFixed(2))}`);
-      lines.push('');
-      lines.push(`  ${dim('Total:')}   ${chalk.white.bold(formatUsd(solUsd + usdcBal))}`);
-    } catch {
-      lines.push(`  ${dim('Could not fetch balances')}`);
-    }
-
-    lines.push(`  ${dim('─'.repeat(48))}`, '');
-    return { success: true, error: lines.join('\n') };
-  }
 
   private async handleViewOrders(): Promise<TxResult> {
     if (!this.wallet.isConnected) {
@@ -1415,10 +1379,6 @@ export class ExecutionEngine implements IExecutionEngine {
     return { success: true, error: output };
   }
 
-  private async handleWalletTokens(): Promise<TxResult> {
-    const output = await renderWalletTokens(this.wallet, this.state);
-    return { success: true, error: output };
-  }
 
   // ─── Analyze ──────────────────────────────────────────────────────────
 
