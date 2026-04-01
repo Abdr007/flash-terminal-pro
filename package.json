@@ -5,6 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
+    "fx": "dist/index.js",
     "flash": "dist/index.js"
   },
   "scripts": {
