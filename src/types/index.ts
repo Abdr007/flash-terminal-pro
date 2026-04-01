@@ -119,8 +119,22 @@ export enum Action {
   WalletDisconnect = 'wallet_disconnect',
   WalletStatus = 'wallet_status',
 
+  // Extra commands
+  CloseAll = 'close_all',
+  TpStatus = 'tp_status',
+  Capital = 'capital',
+  WalletAddress = 'wallet_address',
+  WalletConnect = 'wallet_connect',
+  PositionDebug = 'position_debug',
+  SystemHealth = 'system_health',
+  SystemStatus = 'system_status',
+  SystemMetrics = 'system_metrics',
+  TxMetrics = 'tx_metrics',
+  EarnIntegrations = 'earn_integrations',
+
   // Utilities
   Degen = 'degen',
+  Dryrun = 'dryrun',
 
   // System
   Health = 'health',

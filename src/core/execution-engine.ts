@@ -257,6 +257,34 @@ export class ExecutionEngine implements IExecutionEngine {
       case Action.Degen:
         return { success: true, error: `\n  ${this.config.devMode ? dim('Degen mode already active.') : dim('Enable with --degen flag on trades (up to 500x).')}\n` };
 
+      // ─── Extra commands ─────────────────────────────────────────────
+      case Action.CloseAll:
+        return this.handleCloseAll();
+      case Action.TpStatus:
+        return this.handleViewOrders();
+      case Action.Capital:
+        return this.handleCapital();
+      case Action.WalletAddress:
+        return { success: true, error: this.wallet.isConnected ? `\n  ${this.wallet.publicKey?.toBase58()}\n` : dim('\n  No wallet connected.\n') };
+      case Action.WalletConnect:
+        if (command.params.path) {
+          try { this.wallet.loadFromFile(command.params.path); return { success: true, error: `\n  ${chalk.green('✓')} Connected: ${this.wallet.shortAddress}\n` }; }
+          catch (e) { return { success: false, error: `  ${e instanceof Error ? e.message : String(e)}` }; }
+        }
+        return handleWalletStatus(this.wallet, this.state);
+      case Action.PositionDebug:
+        return this.handleAnalyze(command);
+      case Action.SystemHealth:
+      case Action.SystemStatus:
+      case Action.SystemMetrics:
+        return this.handleHealth();
+      case Action.TxMetrics:
+        return this.handleStats();
+      case Action.EarnIntegrations:
+        return this.handleEarnIntegrations();
+      case Action.Dryrun:
+        return { success: true, error: dim('\n  Dryrun: use simulation mode (select mode 1 on startup).\n  All commands in simulation show previews without executing.\n') };
+
       // ─── FAF (SDK-based, on-chain data) ─────────────────────────────
       case Action.FafStatus:
         return handleFafDashboard(this.sdkService, this.wallet);
@@ -1432,6 +1460,97 @@ export class ExecutionEngine implements IExecutionEngine {
 
 
   // ─── Doctor ───────────────────────────────────────────────────────────
+
+  private async handleCloseAll(): Promise<TxResult> {
+    const positions = await this.state.getPositions();
+    if (positions.length === 0) return { success: true, error: dim('\n  No open positions to close.\n') };
+
+    const lines = [`\n  ${accentBold('CLOSE ALL POSITIONS')}  ${dim(`(${positions.length})`)}`, ''];
+    for (const p of positions) {
+      lines.push(`  ${colorSide(p.side)} ${p.market.padEnd(8)} ${formatUsd(p.sizeUsd)} ${colorPnl(p.pnl)}`);
+    }
+
+    if (this.config.simulationMode) {
+      lines.push('', `  ${dim('[SIMULATION — would close all positions]')}`, '');
+      return { success: true, error: lines.join('\n') };
+    }
+
+    // Execute sequential close
+    let closed = 0;
+    for (const p of positions) {
+      try {
+        const buildResult = await this.api.buildClosePosition({
+          positionKey: p.pubkey,
+          inputUsdUi: String(p.sizeUsd),
+          withdrawTokenSymbol: 'USDC',
+          owner: this.wallet.publicKey!.toBase58(),
+        }) as Record<string, unknown>;
+
+        const tx64 = buildResult['transactionBase64'] as string;
+        if (tx64 && this.wallet.keypair) {
+          const result = await this.txPipeline.execute(tx64, this.wallet.keypair, `close:${p.market}:${p.side}`);
+          if (result.success) {
+            lines.push(`  ${chalk.green('✓')} ${p.market} ${p.side} closed`);
+            closed++;
+          } else {
+            lines.push(`  ${chalk.red('✗')} ${p.market} ${p.side}: ${result.error}`);
+          }
+        }
+      } catch (e) {
+        lines.push(`  ${chalk.red('✗')} ${p.market}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    lines.push('', `  ${dim(`Closed ${closed}/${positions.length} positions`)}`, '');
+    return { success: true, error: lines.join('\n') };
+  }
+
+  private async handleCapital(): Promise<TxResult> {
+    const solBal = await this.state.getBalance('SOL').catch(() => 0);
+    const usdcBal = await this.state.getBalance('USDC').catch(() => 0);
+    const solPrice = await this.state.getPrice('SOL').catch(() => 0);
+    const positions = await this.state.getPositions();
+
+    const walletUsd = solBal * solPrice + usdcBal;
+    const inPositions = positions.reduce((s, p) => s + p.collateralUsd, 0);
+    const available = usdcBal; // USDC is what's used for new trades
+
+    return {
+      success: true,
+      error: [
+        '',
+        `  ${accentBold('TRADING CAPITAL')}`,
+        `  ${dim('─'.repeat(48))}`,
+        '',
+        `  ${dim('Available USDC:')}  ${chalk.green.bold(formatUsd(available))}`,
+        `  ${dim('SOL (wallet):')}    ${formatUsd(solBal * solPrice)} ${dim(`(${solBal.toFixed(4)} SOL)`)}`,
+        `  ${dim('In Positions:')}    ${formatUsd(inPositions)}`,
+        `  ${dim('Total Portfolio:')} ${chalk.white.bold(formatUsd(walletUsd + inPositions))}`,
+        `  ${dim('─'.repeat(48))}`,
+        '',
+      ].join('\n'),
+    };
+  }
+
+  private handleEarnIntegrations(): TxResult {
+    return {
+      success: true,
+      error: [
+        '',
+        `  ${accentBold('FLP INTEGRATION PARTNERS')}`,
+        `  ${dim('─'.repeat(48))}`,
+        '',
+        `  ${chalk.cyan('Loopscale')}    Leverage yield up to 5x on FLP`,
+        `  ${chalk.cyan('Carrot')}       Boost FLP.1 yields with 3.4x leverage`,
+        `  ${chalk.cyan('RateX')}        Trade FLP.1 yield with 10x margin`,
+        `  ${chalk.cyan('Kamino')}       Borrow against FLP.1 (75% LTV)`,
+        '',
+        `  ${dim('These protocols accept Flash Trade FLP tokens.')}`,
+        `  ${dim('Visit each platform for current terms.')}`,
+        `  ${dim('─'.repeat(48))}`,
+        '',
+      ].join('\n'),
+    };
+  }
 
   private async handleDoctor(): Promise<TxResult> {
     const lines = [

@@ -471,7 +471,28 @@ const viewPatterns: PatternMatcher[] = [
       return cmd(Action.WalletUse, { ...flags, name: m[1] }, raw);
     }
 
-    // Degen
+    // Extra commands
+    if (/^close\s+all$/i.test(input)) return cmd(Action.CloseAll, flags, raw);
+    if (/^(?:tp\s+status|sl\s+status|order\s+status)$/i.test(input)) return cmd(Action.TpStatus, flags, raw);
+    if (/^(?:capital|buying\s+power|available)$/i.test(input)) return cmd(Action.Capital, flags, raw);
+    if (/^wallet\s+address$/i.test(input)) return cmd(Action.WalletAddress, flags, raw);
+    if (/^wallet\s+connect(?:\s+(\S+))?$/i.test(input)) {
+      const m = input.match(/^wallet\s+connect(?:\s+(\S+))?$/i);
+      return cmd(Action.WalletConnect, { ...flags, path: m?.[1] }, raw);
+    }
+    if (/^(?:position\s+debug|pos\s+debug)\s+(\w+)/i.test(input)) {
+      const m = input.match(/(\w+)$/i)!;
+      return cmd(Action.PositionDebug, { ...flags, symbol: normalizeAsset(m[1]) }, raw);
+    }
+    if (/^(?:system\s+health|runtime)$/i.test(input)) return cmd(Action.SystemHealth, flags, raw);
+    if (/^(?:system\s+status|protocol\s+status)$/i.test(input)) return cmd(Action.SystemStatus, flags, raw);
+    if (/^(?:system\s+metrics|metrics)$/i.test(input)) return cmd(Action.SystemMetrics, flags, raw);
+    if (/^(?:tx\s+metrics|engine\s+status)$/i.test(input)) return cmd(Action.TxMetrics, flags, raw);
+    if (/^(?:trade\s+history)$/i.test(input)) return cmd(Action.ViewTrades, flags, raw);
+    if (/^(?:earn\s+integrations?)$/i.test(input)) return cmd(Action.EarnIntegrations, flags, raw);
+    if (/^(?:dryrun|dry-run)\s+(.+)/i.test(input)) return cmd(Action.Dryrun, { ...flags, value: input.replace(/^(?:dryrun|dry-run)\s+/i, '') }, raw);
+
+    // Utilities
     if (/^degen$/i.test(input)) return cmd(Action.Degen, flags, raw);
 
     return null;
