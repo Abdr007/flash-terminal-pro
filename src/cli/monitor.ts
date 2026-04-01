@@ -81,9 +81,10 @@ export async function runMonitor(
   let running = true;
   const renderer = new TermRenderer();
 
-  // Get tradeable market symbols (exclude USDC, WSOL, XAUT etc.)
+  // Get tradeable market symbols (exclude USDC, WSOL, XAUT, JitoSOL etc.)
   const markets = await state.getMarkets();
-  const tradeableSymbols = new Set(markets.map(m => m.symbol.toUpperCase()));
+  // Use exact symbol casing from API for matching
+  const tradeableSymbols = new Set(markets.map(m => m.symbol));
 
   // Pause readline, enter raw mode for 'q' key
   const wasRaw = process.stdin.isRaw;
@@ -110,12 +111,15 @@ export async function runMonitor(
 
   // Fetch initial data
   let rows: MarketRow[] = [];
+  let oracleMs = 0;
   try {
+    const start = performance.now();
     rows = await fetchData(api, tradeableSymbols);
+    oracleMs = Math.round(performance.now() - start);
   } catch { /* will show empty */ }
 
   // Render first frame
-  renderer.render(buildFrame(rows));
+  renderer.render(buildFrame(rows, oracleMs));
 
   // Start refresh loop
   let refreshing = false;
@@ -123,9 +127,11 @@ export async function runMonitor(
     if (!running || refreshing) return;
     refreshing = true;
     try {
+      const start = performance.now();
       rows = await fetchData(api, tradeableSymbols);
+      oracleMs = Math.round(performance.now() - start);
       if (!running) return;
-      const frame = buildFrame(rows);
+      const frame = buildFrame(rows, oracleMs);
       if (renderer.hasChanged(frame)) renderer.render(frame);
     } catch { /* skip */ }
     finally { refreshing = false; }
@@ -195,23 +201,28 @@ async function fetchData(
 
   const rows: MarketRow[] = [];
   for (const [sym, pd] of Object.entries(prices)) {
-    const upper = sym.toUpperCase();
-    if (!tradeableSymbols.has(upper)) continue; // Skip non-tradeable (USDC, WSOL, XAUT, etc.)
+    // Match against tradeable symbols (exact match first, then uppercase)
+    if (!tradeableSymbols.has(sym) && !tradeableSymbols.has(sym.toUpperCase())) continue;
 
     const price = Number(pd.priceUi ?? 0);
     if (price <= 0) continue;
 
-    const oi = oiMap.get(upper);
+    // Normalize to uppercase for display and OI lookup
+    const displaySym = sym.toUpperCase();
+    // Skip collateral tokens
+    if (displaySym === 'USDC' || displaySym === 'USDT' || displaySym === 'WSOL' || displaySym === 'XAUT') continue;
+
+    const oi = oiMap.get(displaySym);
     const totalOi = oi ? oi.longOi + oi.shortOi : 0;
-    const longPct = totalOi > 0 ? Math.round((oi!.longOi / totalOi) * 100) : 0;
+    const longPct = totalOi > 0 ? Math.round((oi!.longOi / totalOi) * 100) : 50;
 
     rows.push({
-      symbol: upper,
+      symbol: displaySym,
       price,
-      change24h: 0, // Flash API doesn't provide 24h change
+      change24h: 0,
       totalOi,
       longPct,
-      shortPct: totalOi > 0 ? 100 - longPct : 0,
+      shortPct: totalOi > 0 ? 100 - longPct : 50,
     });
   }
 
@@ -221,27 +232,51 @@ async function fetchData(
 
 // ─── Frame Builder ──────────────────────────────────────────────────────────
 
-function buildFrame(rows: MarketRow[]): string[] {
+function buildFrame(rows: MarketRow[], oracleMs: number): string[] {
   const now = new Date().toLocaleTimeString();
   const d = chalk.dim;
 
+  // Telemetry status bar (matching flash-terminal)
+  const oracleStr = oracleMs < 3000
+    ? chalk.green(`Oracle ${oracleMs}ms`)
+    : oracleMs < 5000
+      ? chalk.yellow(`Oracle ${oracleMs}ms`)
+      : chalk.red(`Oracle ${oracleMs}ms`);
+
   const lines: string[] = [
     `  ${ACCENT.bold('FLASH TERMINAL')} ${d('—')} ${ACCENT.bold('MARKET MONITOR')}`,
+    `  ${oracleStr}  ${d('|')}  ${d('Divergence OK')}`,
     d(`  ${now}  |  Press ${chalk.bold('q')} to exit`),
     `  ${d('─'.repeat(72))}`,
-    `  ${d('Asset'.padEnd(18))}${d('Price'.padStart(14))}${d('24h Change'.padStart(12))}${d('Open Interest'.padStart(16))}${d('Long / Short'.padStart(14))}`,
+    `  ${d('Asset')}${d('Price'.padStart(21))}${d('24h Change'.padStart(12))}${d('Open Interest'.padStart(16))}${d('Long / Short'.padStart(14))}`,
     `  ${d('─'.repeat(72))}`,
   ];
 
   for (const r of rows) {
-    const priceStr = formatPrice(r.price).padStart(14);
-    const changeStr = '+0.00%';
-    const changeColored = d(changeStr.padStart(12));
-    const oiStr = r.totalOi > 0 ? formatUsd(r.totalOi).padStart(16) : ''.padStart(16);
-    const ratioStr = r.totalOi > 0 ? d(`${r.longPct} / ${r.shortPct}`.padStart(14)) : ''.padStart(14);
+    const priceStr = formatPrice(r.price);
+    const changeStr = r.change24h !== 0
+      ? `${r.change24h >= 0 ? '+' : ''}${r.change24h.toFixed(2)}%`
+      : '+0.00%';
+    const changeColored = r.change24h > 0
+      ? chalk.green(changeStr)
+      : r.change24h < 0
+        ? chalk.red(changeStr)
+        : d(changeStr);
 
-    lines.push(`  ${chalk.bold(r.symbol.padEnd(18))}${priceStr}${changeColored}${oiStr}${ratioStr}`);
+    const oiStr = r.totalOi > 0
+      ? formatUsd(r.totalOi)
+      : r.totalOi === 0 ? '$0.00' : '';
+
+    const ratioStr = `${r.longPct} / ${r.shortPct}`;
+
+    lines.push(
+      `  ${chalk.bold(('  ' + r.symbol).padEnd(14))}${priceStr.padStart(14)}${changeColored.padStart(12 + (changeColored.length - changeStr.length))}${oiStr.padStart(16)}${d(ratioStr.padStart(14))}`,
+    );
   }
+
+  // Footer (matching flash-terminal)
+  lines.push(`  ${d('─'.repeat(72))}`);
+  lines.push(d(`  Source: Pyth Hermes (oracle) | fstats (open interest)`));
 
   return lines;
 }
