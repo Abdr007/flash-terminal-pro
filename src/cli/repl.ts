@@ -21,30 +21,16 @@ export class Repl {
 
   constructor(
     private router: CommandRouter,
-    private config: FlashXConfig,
+    _config: FlashXConfig,
     private mode: SelectedMode = 'simulation',
-  ) {}
+  ) { void _config; }
 
   async start(): Promise<void> {
     this.running = true;
 
-    // Mode-specific status line
-    if (this.mode === 'live') {
-      console.log(`  ${chalk.green.bold('●')} ${chalk.green('LIVE')} ${dim('— real trades active')}`);
-    } else {
-      console.log(`  ${chalk.yellow('●')} ${chalk.yellow('SIMULATION')} ${dim('— no real trades')}`);
-    }
-
-    if (this.config.devMode) {
-      console.log(`  ${dim('Dev:')}     ${chalk.magenta.bold('DEV_MODE ACTIVE')}`);
-    }
-    console.log(`  ${dim('Type "help" for commands')}`);
-    console.log('');
-
-    // Mode-aware prompt
-    const promptStr = this.mode === 'live'
-      ? `${chalk.green('flash')}${chalk.green.bold('●')}${chalk.dim('>')} `
-      : `${chalk.cyan('flash')}${chalk.dim('>')} `;
+    // Prompt matches flash-terminal: "flash [live] > " or "flash [sim] > "
+    const modeTag = this.mode === 'live' ? chalk.green('live') : chalk.yellow('sim');
+    const promptStr = `${chalk.hex('#00FF88')('flash')} ${chalk.dim('[')}${modeTag}${chalk.dim(']')} ${chalk.dim('>')} `;
 
     this.rl = createInterface({
       input: process.stdin,
