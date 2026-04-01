@@ -32,6 +32,7 @@ import { resolvePool } from '../services/pool-resolver.js';
 import { estimateOpenPosition, crossValidateWithEstimate } from '../services/quote-engine.js';
 import { getAuditLog } from '../security/audit-log.js';
 import { renderDashboard, renderWalletTokens } from '../cli/dashboard.js';
+import type { SdkService } from '../services/sdk-service.js';
 import { StateConsistency } from './state-consistency.js';
 import { getMetrics } from './metrics.js';
 import { ErrorCode } from '../types/errors.js';
@@ -58,6 +59,7 @@ export class ExecutionEngine implements IExecutionEngine {
   private wallet: WalletManager;
   txPipeline: TxPipeline;
   private rpcManager: RpcManager | null = null;
+  private sdkService: SdkService | null = null;
 
   constructor(
     private config: FlashXConfig,
@@ -66,12 +68,14 @@ export class ExecutionEngine implements IExecutionEngine {
     wallet: WalletManager,
     txPipeline: TxPipeline,
     rpcManager?: RpcManager,
+    sdkService?: SdkService,
   ) {
     this.state = state;
     this.api = api;
     this.wallet = wallet;
     this.txPipeline = txPipeline;
     this.rpcManager = rpcManager ?? null;
+    this.sdkService = sdkService ?? null;
     this.risk = new RiskEngine(config, state);
   }
 
@@ -794,10 +798,52 @@ export class ExecutionEngine implements IExecutionEngine {
     return { success: false, error: err(`  Unknown order action: ${command.action}`) };
   }
 
-  // ─── LP Handler (NOT SUPPORTED — requires SDK) ────────────────────────
+  // ─── LP Handler (via SDK Service) ──────────────────────────────────────
 
-  private async handleLp(_command: ParsedCommand): Promise<TxResult> {
-    return { success: false, error: '  LP operations require SDK. Use flash.trade website for LP.' };
+  private async handleLp(command: ParsedCommand): Promise<TxResult> {
+    const { token, pool, amount } = command.params;
+    const isDeposit = command.action === Action.AddLiquidity;
+
+    if (!this.sdkService) {
+      return { success: false, error: '  LP operations require SDK service. Restart with SDK enabled.' };
+    }
+    if (!this.wallet.isConnected || !this.wallet.keypair) {
+      return { success: false, error: err('  Wallet not connected') };
+    }
+    if (!pool || !amount) {
+      return { success: false, error: err(`  Usage: ${isDeposit ? 'deposit 100 USDC into Crypto.1' : 'withdraw 100 USDC from Crypto.1'}`) };
+    }
+
+    const log = getLogger();
+    const tokenSym = token ?? 'USDC';
+
+    log.info('ENGINE', `LP ${isDeposit ? 'deposit' : 'withdraw'}: ${amount} ${tokenSym} ${isDeposit ? '→' : '←'} ${pool}`);
+
+    try {
+      const result = isDeposit
+        ? await this.sdkService.buildLpDeposit(this.wallet.keypair, tokenSym, amount, pool)
+        : await this.sdkService.buildLpWithdraw(this.wallet.keypair, tokenSym, amount, pool);
+
+      if (!result) {
+        return { success: false, error: err(`  LP ${isDeposit ? 'deposit' : 'withdraw'} build failed`) };
+      }
+
+      // Execute through the same pipeline as perps
+      const tradeKey = `lp:${isDeposit ? 'deposit' : 'withdraw'}:${pool}:${amount}`;
+      const txResult = await this.txPipeline.execute(result.transactionBase64, this.wallet.keypair, tradeKey);
+
+      if (!txResult.success) {
+        return { success: false, error: err(`  LP failed: ${txResult.error}`) };
+      }
+
+      return {
+        success: true,
+        signature: txResult.signature,
+        error: `\n  ${chalk.green('✓')} LP ${isDeposit ? 'deposited' : 'withdrawn'}: ${txResult.signature?.slice(0, 16)}...\n  ${dim(`https://solscan.io/tx/${txResult.signature}`)}\n`,
+      };
+    } catch (e) {
+      return { success: false, error: err(`  LP failed: ${e instanceof Error ? e.message : String(e)}`) };
+    }
   }
 
   // ─── View Handlers ────────────────────────────────────────────────────

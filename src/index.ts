@@ -18,6 +18,7 @@ import { CommandRouter } from './cli/router.js';
 import { Repl } from './cli/repl.js';
 import { selectMode } from './cli/mode-selector.js';
 import { FlashApiClient } from './services/api-client.js';
+import { SdkService } from './services/sdk-service.js';
 import { RpcManager } from './services/rpc-manager.js';
 import { WalletManager } from './wallet/manager.js';
 import { TxPipeline } from './tx/pipeline.js';
@@ -78,13 +79,16 @@ async function main(): Promise<void> {
   // Initialize tx pipeline with RPC manager's connection
   const txPipeline = new TxPipeline(rpcManager.connection, config);
 
+  // SDK service (isolated — only for FAF/LP operations)
+  const sdkService = new SdkService(config);
+
   // Start RPC health monitoring
   rpcManager.startHealthMonitor();
 
   // ─── Single command mode (uses env SIMULATION_MODE) ─────────────────
   const args = process.argv.slice(2);
   if (args.length > 0) {
-    const execution = new ExecutionEngine(config, state, api, wallet, txPipeline, rpcManager);
+    const execution = new ExecutionEngine(config, state, api, wallet, txPipeline, rpcManager, sdkService);
     const router = new CommandRouter(execution);
     const input = args.join(' ');
     const output = await router.route(input);
