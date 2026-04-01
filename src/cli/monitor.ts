@@ -221,8 +221,8 @@ async function fetchData(
 
     // Normalize to uppercase for display and OI lookup
     const displaySym = sym.toUpperCase();
-    // Skip collateral tokens
-    if (displaySym === 'USDC' || displaySym === 'USDT' || displaySym === 'WSOL' || displaySym === 'XAUT') continue;
+    // Skip collateral/derivative tokens (not shown in flash-terminal monitor)
+    if (displaySym === 'USDC' || displaySym === 'USDT' || displaySym === 'WSOL' || displaySym === 'XAUT' || displaySym === 'JITOSOL') continue;
 
     const oi = oiMap.get(displaySym);
     const totalOi = oi ? oi.longOi + oi.shortOi : 0;
@@ -282,7 +282,7 @@ function buildFrame(rows: MarketRow[], oracleMs: number): string[] {
     const ratioStr = `${r.longPct} / ${r.shortPct}`;
 
     lines.push(
-      `  ${chalk.bold(('  ' + r.symbol).padEnd(14))}${priceStr.padStart(14)}${changeColored.padStart(12 + (changeColored.length - changeStr.length))}${oiStr.padStart(16)}${d(ratioStr.padStart(14))}`,
+      `  ${chalk.bold(r.symbol.padEnd(14))}${priceStr.padStart(14)}${changeColored.padStart(12 + (changeColored.length - changeStr.length))}${oiStr.padStart(16)}${d(ratioStr.padStart(14))}`,
     );
   }
 
