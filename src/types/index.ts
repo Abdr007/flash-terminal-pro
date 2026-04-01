@@ -91,6 +91,18 @@ export enum Action {
   // Earn advanced
   EarnDashboard = 'earn_dashboard',
   EarnBest = 'earn_best',
+  EarnInfo = 'earn_info',
+  EarnSimulate = 'earn_simulate',
+  EarnDemand = 'earn_demand',
+  EarnRotate = 'earn_rotate',
+  EarnPnl = 'earn_pnl',
+  EarnPositions = 'earn_positions',
+  EarnHistory = 'earn_history',
+  EarnDeposit = 'earn_deposit',
+  EarnWithdraw = 'earn_withdraw',
+  EarnStake = 'earn_stake',
+  EarnUnstake = 'earn_unstake',
+  EarnClaim = 'earn_claim',
 
   // Utilities
   RpcStatus = 'rpc_status',

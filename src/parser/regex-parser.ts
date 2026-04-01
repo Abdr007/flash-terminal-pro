@@ -414,9 +414,49 @@ const viewPatterns: PatternMatcher[] = [
     if (/^(?:rpc\s+status|rpc)$/i.test(input)) return cmd(Action.RpcStatus, flags, raw);
     if (/^(?:monitor|live|watch)$/i.test(input)) return cmd(Action.Monitor, flags, raw);
 
-    // Earn advanced
-    if (/^earn\s+(?:dashboard|overview|positions?)$/i.test(input)) return cmd(Action.EarnDashboard, flags, raw);
+    // Earn (full command set — 16 commands)
+    if (/^earn\s+dashboard$/i.test(input)) return cmd(Action.EarnDashboard, flags, raw);
     if (/^earn\s+best$/i.test(input)) return cmd(Action.EarnBest, flags, raw);
+    if (/^earn\s+positions?$/i.test(input)) return cmd(Action.EarnPositions, flags, raw);
+    if (/^earn\s+pnl$/i.test(input)) return cmd(Action.EarnPnl, flags, raw);
+    if (/^earn\s+demand$/i.test(input)) return cmd(Action.EarnDemand, flags, raw);
+    if (/^earn\s+rotate$/i.test(input)) return cmd(Action.EarnRotate, flags, raw);
+    if (/^earn\s+claim$/i.test(input)) return cmd(Action.EarnClaim, flags, raw);
+    // earn info <pool>
+    if (/^earn\s+info\s+(\S+)/i.test(input)) {
+      const m = input.match(/^earn\s+info\s+(\S+)/i)!;
+      return cmd(Action.EarnInfo, { ...flags, pool: m[1] }, raw);
+    }
+    // earn simulate $<amount> <pool>
+    if (/^earn\s+simulate\s+\$?(\d+(?:\.\d+)?)\s+(\S+)/i.test(input)) {
+      const m = input.match(/^earn\s+simulate\s+\$?(\d+(?:\.\d+)?)\s+(\S+)/i)!;
+      return cmd(Action.EarnSimulate, { ...flags, amount: parseFloat(m[1]), pool: m[2] }, raw);
+    }
+    // earn history [pool]
+    if (/^earn\s+history(?:\s+(\S+))?$/i.test(input)) {
+      const m = input.match(/^earn\s+history(?:\s+(\S+))?$/i)!;
+      return cmd(Action.EarnHistory, { ...flags, pool: m[1] }, raw);
+    }
+    // earn deposit/add $<amount> <pool>
+    if (/^earn\s+(?:deposit|add)\s+\$?(\d+(?:\.\d+)?)\s+(\S+)/i.test(input)) {
+      const m = input.match(/^earn\s+(?:deposit|add)\s+\$?(\d+(?:\.\d+)?)\s+(\S+)/i)!;
+      return cmd(Action.EarnDeposit, { ...flags, amount: parseFloat(m[1]), pool: m[2] }, raw);
+    }
+    // earn withdraw/remove <pct>% <pool>
+    if (/^earn\s+(?:withdraw|remove)\s+(\d+)%?\s+(\S+)/i.test(input)) {
+      const m = input.match(/^earn\s+(?:withdraw|remove)\s+(\d+)%?\s+(\S+)/i)!;
+      return cmd(Action.EarnWithdraw, { ...flags, percent: parseFloat(m[1]), pool: m[2] }, raw);
+    }
+    // earn stake $<amount> <pool>
+    if (/^earn\s+stake\s+\$?(\d+(?:\.\d+)?)\s+(\S+)/i.test(input)) {
+      const m = input.match(/^earn\s+stake\s+\$?(\d+(?:\.\d+)?)\s+(\S+)/i)!;
+      return cmd(Action.EarnStake, { ...flags, amount: parseFloat(m[1]), pool: m[2] }, raw);
+    }
+    // earn unstake <pct>% <pool>
+    if (/^earn\s+unstake\s+(\d+)%?\s+(\S+)/i.test(input)) {
+      const m = input.match(/^earn\s+unstake\s+(\d+)%?\s+(\S+)/i)!;
+      return cmd(Action.EarnUnstake, { ...flags, percent: parseFloat(m[1]), pool: m[2] }, raw);
+    }
 
     // Wallet
     if (/^wallet\s+disconnect$/i.test(input)) return cmd(Action.WalletDisconnect, flags, raw);

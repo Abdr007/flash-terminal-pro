@@ -33,6 +33,11 @@ import { estimateOpenPosition, crossValidateWithEstimate } from '../services/quo
 import { getAuditLog } from '../security/audit-log.js';
 import { renderDashboard, renderWalletTokens } from '../cli/dashboard.js';
 import { renderPnl, renderExposure, renderRisk } from '../cli/analytics.js';
+import {
+  handleEarnOverview, handleEarnInfo, handleEarnBest, handleEarnSimulate,
+  handleEarnDemand, handleEarnRotate, handleEarnDashboard as earnDash,
+  handleEarnPnl, handleEarnPositions, handleEarnHistory, handleEarnExecution,
+} from '../earn/earn-handlers.js';
 import type { SdkService } from '../services/sdk-service.js';
 import { StateConsistency } from './state-consistency.js';
 import { getMetrics } from './metrics.js';
@@ -191,8 +196,9 @@ export class ExecutionEngine implements IExecutionEngine {
       case Action.ViewOrders:
         return this.handleViewOrders();
       case Action.ViewEarn:
+        return handleEarnOverview(this.api);
       case Action.ViewPoolDetail:
-        return this.handleViewEarn(command);
+        return handleEarnInfo(command.params.pool ?? '', this.api);
       case Action.ViewTokens:
         return this.handleViewTokens();
       case Action.ViewToken:
@@ -240,15 +246,35 @@ export class ExecutionEngine implements IExecutionEngine {
       case Action.ProtocolStatus:
         return this.handleHealth();
       case Action.InspectPool:
-        return this.handleViewEarn({ ...command, params: { ...command.params, pool: command.params.pool } });
+        return handleEarnInfo(command.params.pool ?? '', this.api);
       case Action.InspectMarket:
         return this.handleViewMarket(command);
 
-      // ─── Earn advanced ──────────────────────────────────────────────
+      // ─── Earn (full 16-command system) ─────────────────────────────
       case Action.EarnDashboard:
-        return this.handleViewEarn(command);
+        return earnDash(this.api);
       case Action.EarnBest:
-        return this.handleEarnBest();
+        return handleEarnBest(this.api);
+      case Action.EarnInfo:
+        return handleEarnInfo(command.params.pool ?? '', this.api);
+      case Action.EarnSimulate:
+        return handleEarnSimulate(command.params.amount ?? 1000, command.params.pool ?? 'crypto', this.api);
+      case Action.EarnDemand:
+        return handleEarnDemand(this.api);
+      case Action.EarnRotate:
+        return handleEarnRotate(this.api);
+      case Action.EarnPnl:
+        return handleEarnPnl();
+      case Action.EarnPositions:
+        return handleEarnPositions();
+      case Action.EarnHistory:
+        return handleEarnHistory(command.params.pool);
+      case Action.EarnDeposit:
+      case Action.EarnWithdraw:
+      case Action.EarnStake:
+      case Action.EarnUnstake:
+      case Action.EarnClaim:
+        return handleEarnExecution(command.action.replace('earn_', ''));
 
       // ─── Utilities ──────────────────────────────────────────────────
       case Action.RpcStatus:
@@ -1143,85 +1169,6 @@ export class ExecutionEngine implements IExecutionEngine {
     }
   }
 
-  // ─── Earn / Pool Views ────────────────────────────────────────────────
-
-  private async handleViewEarn(command: ParsedCommand): Promise<TxResult> {
-    const poolName = command.params.pool;
-
-    try {
-      const poolData = await this.api.getPoolData() as Record<string, unknown>;
-      const pools = (poolData['pools'] ?? []) as Record<string, unknown>[];
-
-      if (poolName) {
-        // Pool detail
-        const pool = pools.find(p =>
-          String(p['poolName'] ?? '').toLowerCase() === poolName.toLowerCase() ||
-          String(p['poolName'] ?? '').toLowerCase().startsWith(poolName.toLowerCase())
-        );
-        if (!pool) return { success: false, error: err(`  Pool not found: ${poolName}`) };
-
-        const lp = pool['lpStats'] as Record<string, unknown> | undefined;
-        const custodies = (pool['custodyStats'] ?? []) as Record<string, unknown>[];
-
-        const lines = [
-          '',
-          `  ${accentBold(String(pool['poolName']))}`,
-          `  ${dim('─'.repeat(52))}`,
-          '',
-          `  ${dim('TVL:')}         ${chalk.white.bold(formatUsd(Number(lp?.['totalPoolValueUsd'] ?? 0)))}`,
-          `  ${dim('LP Price:')}    ${chalk.white('$' + String(lp?.['lpPrice'] ?? '—'))}`,
-          `  ${dim('LP Supply:')}   ${dim(String(lp?.['lpTokenSupply'] ?? '—'))}`,
-          `  ${dim('Stable %:')}    ${dim(String(lp?.['stableCoinPercentage'] ?? '—') + '%')}`,
-          `  ${dim('Max AUM:')}     ${dim(formatUsd(Number(lp?.['maxAumUsd'] ?? 0)))}`,
-          '',
-          `  ${dim('ASSETS')}`,
-        ];
-
-        for (const c of custodies) {
-          const sym = String(c['symbol'] ?? '');
-          const owned = String(c['assetsOwnedAmountUi'] ?? '0');
-          const usd = formatUsd(Number(c['totalUsdOwnedAmountUi'] ?? 0));
-          const ratio = String(c['currentRatioUi'] ?? '0');
-          const target = String(c['targetRatioUi'] ?? '0');
-          const util = String(c['utilizationUi'] ?? '0');
-          lines.push(`    ${pad(sym, 10)} ${pad(owned, 14)} ${pad(usd, 12)} ratio: ${ratio}% / ${target}%  util: ${util}%`);
-        }
-
-        lines.push(`  ${dim('─'.repeat(52))}`);
-        lines.push(`  ${dim('Earn execution: NOT SUPPORTED via API (use flash.trade)')}`, '');
-        return { success: true, error: lines.join('\n') };
-      }
-
-      // Overview of all pools
-      const lines = [
-        '',
-        `  ${accentBold('EARN — LIQUIDITY POOLS')}`,
-        `  ${dim('─'.repeat(56))}`,
-        '',
-        dim(`  ${pad('Pool', 16)} ${pad('TVL', 14)} ${pad('LP Price', 12)} ${pad('Stable %', 10)} ${pad('Assets', 6)}`),
-        dim('  ' + '─'.repeat(56)),
-      ];
-
-      for (const pool of pools) {
-        const name = String(pool['poolName'] ?? '');
-        const lp = pool['lpStats'] as Record<string, unknown> | undefined;
-        const tvl = formatUsd(Number(lp?.['totalPoolValueUsd'] ?? 0));
-        const price = '$' + String(lp?.['lpPrice'] ?? '—');
-        const stable = String(lp?.['stableCoinPercentage'] ?? '—') + '%';
-        const assets = String((pool['custodyStats'] as unknown[])?.length ?? 0);
-        lines.push(`  ${pad(name, 16)} ${pad(tvl, 14)} ${pad(price, 12)} ${pad(stable, 10)} ${pad(assets, 6)}`);
-      }
-
-      lines.push('');
-      lines.push(`  ${dim('Type "pool <name>" for details (e.g., pool Crypto.1)')}`);
-      lines.push(`  ${dim('Earn execution: NOT SUPPORTED via API (use flash.trade)')}`);
-      lines.push('');
-      return { success: true, error: lines.join('\n') };
-    } catch (e) {
-      return { success: false, error: err(`  Failed to fetch pool data: ${e instanceof Error ? e.message : String(e)}`) };
-    }
-  }
-
   // ─── Token Views ─────────────────────────────────────────────────────
 
   private async handleViewTokens(): Promise<TxResult> {
@@ -1466,42 +1413,6 @@ export class ExecutionEngine implements IExecutionEngine {
     return { success: true, error: lines.join('\n') };
   }
 
-  // ─── Earn Best ────────────────────────────────────────────────────────
-
-  private async handleEarnBest(): Promise<TxResult> {
-    try {
-      const poolData = await this.api.getPoolData() as Record<string, unknown>;
-      const pools = (poolData['pools'] ?? []) as Record<string, unknown>[];
-
-      const ranked = pools
-        .map(p => ({
-          name: String(p['poolName'] ?? ''),
-          tvl: Number((p['lpStats'] as Record<string, unknown>)?.['totalPoolValueUsd'] ?? 0),
-          lpPrice: String((p['lpStats'] as Record<string, unknown>)?.['lpPrice'] ?? '0'),
-          stable: Number((p['lpStats'] as Record<string, unknown>)?.['stableCoinPercentage'] ?? 0),
-        }))
-        .sort((a, b) => b.tvl - a.tvl);
-
-      const lines = [
-        '',
-        `  ${accentBold('EARN — RANKED BY TVL')}`,
-        `  ${dim('─'.repeat(48))}`,
-        '',
-      ];
-
-      ranked.forEach((p, i) => {
-        const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
-        lines.push(`  ${medal} ${p.name.padEnd(14)} TVL: ${formatUsd(p.tvl).padEnd(10)} LP: $${p.lpPrice}`);
-      });
-
-      lines.push('');
-      lines.push(`  ${dim('Tip: "pool <name>" for detail, "earn" for overview')}`);
-      lines.push('');
-      return { success: true, error: lines.join('\n') };
-    } catch {
-      return { success: false, error: err('  Could not fetch pool data') };
-    }
-  }
 
   // ─── Doctor ───────────────────────────────────────────────────────────
 
