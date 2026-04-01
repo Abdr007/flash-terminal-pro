@@ -463,7 +463,16 @@ const viewPatterns: PatternMatcher[] = [
     }
 
     // Wallet
+    if (/^wallet$/i.test(input)) return cmd(Action.WalletStatus, flags, raw);
     if (/^wallet\s+disconnect$/i.test(input)) return cmd(Action.WalletDisconnect, flags, raw);
+    if (/^wallet\s+list$/i.test(input)) return cmd(Action.WalletList, flags, raw);
+    if (/^wallet\s+use\s+(\S+)/i.test(input)) {
+      const m = input.match(/^wallet\s+use\s+(\S+)/i)!;
+      return cmd(Action.WalletUse, { ...flags, name: m[1] }, raw);
+    }
+
+    // Degen
+    if (/^degen$/i.test(input)) return cmd(Action.Degen, flags, raw);
 
     return null;
   },

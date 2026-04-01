@@ -44,6 +44,8 @@ import {
   handleFafTier, handleFafRewards, handleFafReferral, handleFafPoints,
   handleFafRequests,
 } from '../faf/faf-handlers.js';
+import { handleVolume, handleOpenInterest, handleFunding, handleFees, handleNotSupported } from '../cli/market-analytics.js';
+import { handleWalletStatus, handleWalletList, handleWalletUse, handleWalletDisconnect } from '../cli/wallet-commands.js';
 import { StateConsistency } from './state-consistency.js';
 import { getMetrics } from './metrics.js';
 import { ErrorCode } from '../types/errors.js';
@@ -220,14 +222,31 @@ export class ExecutionEngine implements IExecutionEngine {
         return { success: true, error: await renderExposure(this.state) };
       case Action.ViewRisk:
         return { success: true, error: await renderRisk(this.state) };
-      case Action.ViewFunding:
-      case Action.ViewOI:
-      case Action.ViewFees:
       case Action.ViewHours:
+        return { success: true, error: dim('  Market hours data — check flash.trade website.') };
       case Action.ViewVolume:
+        return handleVolume();
+      case Action.ViewOI:
+        return handleOpenInterest(this.api);
+      case Action.ViewFunding:
+        return handleFunding(this.api, command.params.symbol);
+      case Action.ViewFees:
+        return handleFees();
       case Action.ViewLiquidations:
       case Action.ViewDepth:
-        return { success: true, error: dim('  Analytics data not available via API. Use flash.trade website.') };
+        return handleNotSupported(command.action);
+
+      // ─── Wallet Management ──────────────────────────────────────────
+      case Action.WalletStatus:
+        return handleWalletStatus(this.wallet, this.state);
+      case Action.WalletList:
+        return handleWalletList();
+      case Action.WalletUse:
+        return handleWalletUse(command.params.name ?? '', this.wallet);
+      case Action.WalletDisconnect:
+        return handleWalletDisconnect(this.wallet);
+      case Action.Degen:
+        return { success: true, error: `\n  ${this.config.devMode ? dim('Degen mode already active.') : dim('Enable with --degen flag on trades (up to 500x).')}\n` };
 
       // ─── FAF (SDK-based, on-chain data) ─────────────────────────────
       case Action.FafStatus:

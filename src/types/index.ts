@@ -117,6 +117,10 @@ export enum Action {
   WalletUse = 'wallet_use',
   WalletBalance = 'wallet_balance',
   WalletDisconnect = 'wallet_disconnect',
+  WalletStatus = 'wallet_status',
+
+  // Utilities
+  Degen = 'degen',
 
   // System
   Health = 'health',
