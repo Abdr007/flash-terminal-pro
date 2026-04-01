@@ -136,10 +136,21 @@ function classifyIntent(input: string): IntentResult | null {
     }
   }
 
+  // Natural language queries
+  if (/how.*(portfolio|doing|perform)/i.test(lower)) return { action: Action.ViewDashboard, confidence: 0.9, params: {} };
+  if (/what.*(position|open|trade)/i.test(lower)) return { action: Action.ViewPositions, confidence: 0.9, params: {} };
+  if (/what.*(balance|wallet|money)/i.test(lower)) return { action: Action.ViewBalance, confidence: 0.9, params: {} };
+  if (/how.*risk/i.test(lower)) return { action: Action.ViewRisk, confidence: 0.9, params: {} };
+  if (/what.*pnl|how.*profit/i.test(lower)) return { action: Action.ViewPnl, confidence: 0.9, params: {} };
+  if (/what.*exposure/i.test(lower)) return { action: Action.ViewExposure, confidence: 0.9, params: {} };
+  if (/where.*earn|best.*pool|yield/i.test(lower)) return { action: Action.ViewEarn, confidence: 0.85, params: {} };
+  if (/system.*health|is.*ok|status/i.test(lower)) return { action: Action.Health, confidence: 0.85, params: {} };
+
   // View: just want to see something
   if (viewScore > 0 || (tokens.length === 0 && words.some(w => VIEW_KEYWORDS.has(w)))) {
     if (/\bposition/i.test(lower)) return { action: Action.ViewPositions, confidence: 0.85, params: {} };
     if (/\bportfolio/i.test(lower)) return { action: Action.ViewPortfolio, confidence: 0.85, params: {} };
+    if (/\bdashboard/i.test(lower)) return { action: Action.ViewDashboard, confidence: 0.85, params: {} };
     if (/\bmarket/i.test(lower)) return { action: Action.ViewMarkets, confidence: 0.85, params: {} };
     if (/\bbalance/i.test(lower)) return { action: Action.ViewBalance, confidence: 0.85, params: {} };
     if (/\bprice/i.test(lower) && tokens.length > 0) {
@@ -147,6 +158,10 @@ function classifyIntent(input: string): IntentResult | null {
     }
     if (/\bpool/i.test(lower)) return { action: Action.ViewPools, confidence: 0.85, params: {} };
     if (/\border/i.test(lower)) return { action: Action.ViewOrders, confidence: 0.85, params: {} };
+    if (/\bpnl\b/i.test(lower)) return { action: Action.ViewPnl, confidence: 0.85, params: {} };
+    if (/\brisk\b/i.test(lower)) return { action: Action.ViewRisk, confidence: 0.85, params: {} };
+    if (/\bearn\b/i.test(lower)) return { action: Action.ViewEarn, confidence: 0.85, params: {} };
+    if (/\bfaf\b/i.test(lower)) return { action: Action.FafStatus, confidence: 0.85, params: {} };
   }
 
   // Open position with less signal (just side + market, no leverage)

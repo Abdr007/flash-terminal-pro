@@ -390,6 +390,37 @@ const viewPatterns: PatternMatcher[] = [
     if (/^(?:exposure|exp)$/i.test(input)) return cmd(Action.ViewExposure, flags, raw);
     if (/^(?:risk|risk\s*report)$/i.test(input)) return cmd(Action.ViewRisk, flags, raw);
     if (/^(?:wallet\s+tokens?|holdings|assets|wallet\s+balance)$/i.test(input)) return cmd(Action.ViewWalletTokens, flags, raw);
+
+    // FAF
+    if (/^(?:faf|faf\s+dashboard|faf\s+status)$/i.test(input)) return cmd(Action.FafStatus, flags, raw);
+    if (/^faf\s+stake\s+(\d+)/i.test(input)) return cmd(Action.FafStake, { ...flags, amount: parseFloat(input.match(/\d+/)![0]) }, raw);
+    if (/^faf\s+unstake\s+(\d+)/i.test(input)) return cmd(Action.FafUnstake, { ...flags, amount: parseFloat(input.match(/\d+/)![0]) }, raw);
+    if (/^faf\s+claim$/i.test(input)) return cmd(Action.FafClaim, flags, raw);
+    if (/^faf\s+tier$/i.test(input)) return cmd(Action.FafTier, flags, raw);
+    if (/^faf\s+rewards?$/i.test(input)) return cmd(Action.FafRewards, flags, raw);
+    if (/^faf\s+referral$/i.test(input)) return cmd(Action.FafReferral, flags, raw);
+    if (/^faf\s+points?$/i.test(input)) return cmd(Action.FafPoints, flags, raw);
+    if (/^faf\s+requests?$/i.test(input)) return cmd(Action.FafRequests, flags, raw);
+
+    // Analytics
+    if (/^(?:volume|vol)$/i.test(input)) return cmd(Action.ViewVolume, flags, raw);
+    if (/^(?:liquidations?|liqs?)$/i.test(input)) return cmd(Action.ViewLiquidations, flags, raw);
+    if (/^(?:depth)$/i.test(input)) return cmd(Action.ViewDepth, flags, raw);
+
+    // Protocol
+    if (/^(?:inspect\s+protocol|protocol\s+status|protocol)$/i.test(input)) return cmd(Action.InspectProtocol, flags, raw);
+    if (/^(?:system\s+audit|audit)$/i.test(input)) return cmd(Action.SystemAudit, flags, raw);
+    if (/^(?:doctor|diag|diagnostic)$/i.test(input)) return cmd(Action.Doctor, flags, raw);
+    if (/^(?:rpc\s+status|rpc)$/i.test(input)) return cmd(Action.RpcStatus, flags, raw);
+    if (/^(?:monitor|live|watch)$/i.test(input)) return cmd(Action.Monitor, flags, raw);
+
+    // Earn advanced
+    if (/^earn\s+(?:dashboard|overview|positions?)$/i.test(input)) return cmd(Action.EarnDashboard, flags, raw);
+    if (/^earn\s+best$/i.test(input)) return cmd(Action.EarnBest, flags, raw);
+
+    // Wallet
+    if (/^wallet\s+disconnect$/i.test(input)) return cmd(Action.WalletDisconnect, flags, raw);
+
     return null;
   },
 
@@ -403,6 +434,14 @@ const viewPatterns: PatternMatcher[] = [
     if (pl) return cmd(Action.ViewPoolDetail, { ...flags, pool: pl[1] }, raw);
     const tk = input.match(/^token\s+(\w+)/i);
     if (tk) return cmd(Action.ViewToken, { ...flags, symbol: normalizeAsset(tk[1]) }, raw);
+    const az = input.match(/^(?:analyze|analysis)\s+(\w+)/i);
+    if (az) return cmd(Action.Analyze, { ...flags, symbol: normalizeAsset(az[1]) }, raw);
+    const ip = input.match(/^inspect\s+pool\s+(\S+)/i);
+    if (ip) return cmd(Action.InspectPool, { ...flags, pool: ip[1] }, raw);
+    const im = input.match(/^inspect\s+market\s+(\w+)/i);
+    if (im) return cmd(Action.InspectMarket, { ...flags, symbol: normalizeAsset(im[1]) }, raw);
+    const fd = input.match(/^funding\s+(\w+)/i);
+    if (fd) return cmd(Action.ViewFunding, { ...flags, symbol: normalizeAsset(fd[1]) }, raw);
     return null;
   },
 

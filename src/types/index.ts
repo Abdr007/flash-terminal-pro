@@ -69,12 +69,42 @@ export enum Action {
   ViewExposure = 'view_exposure',
   ViewRisk = 'view_risk',
 
+  // FAF advanced
+  FafTier = 'faf_tier',
+  FafRewards = 'faf_rewards',
+  FafReferral = 'faf_referral',
+  FafPoints = 'faf_points',
+  FafRequests = 'faf_requests',
+
+  // Analytics
+  Analyze = 'analyze',
+  ViewVolume = 'view_volume',
+  ViewLiquidations = 'view_liquidations',
+  ViewDepth = 'view_depth',
+
+  // Protocol
+  InspectProtocol = 'inspect_protocol',
+  InspectPool = 'inspect_pool',
+  InspectMarket = 'inspect_market',
+  ProtocolStatus = 'protocol_status',
+
+  // Earn advanced
+  EarnDashboard = 'earn_dashboard',
+  EarnBest = 'earn_best',
+
+  // Utilities
+  RpcStatus = 'rpc_status',
+  SystemAudit = 'system_audit',
+  Doctor = 'doctor',
+  Monitor = 'monitor',
+
   // Wallet
   WalletCreate = 'wallet_create',
   WalletImport = 'wallet_import',
   WalletList = 'wallet_list',
   WalletUse = 'wallet_use',
   WalletBalance = 'wallet_balance',
+  WalletDisconnect = 'wallet_disconnect',
 
   // System
   Health = 'health',
