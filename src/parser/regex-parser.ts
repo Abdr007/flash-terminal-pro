@@ -485,6 +485,7 @@ const viewPatterns: PatternMatcher[] = [
       return cmd(Action.PositionDebug, { ...flags, symbol: normalizeAsset(m[1]) }, raw);
     }
     if (/^(?:system\s+health|runtime)$/i.test(input)) return cmd(Action.SystemHealth, flags, raw);
+    if (/^(?:update|flash\s+update)$/i.test(input)) return cmd(Action.Update, flags, raw);
     if (/^(?:system\s+status|protocol\s+status)$/i.test(input)) return cmd(Action.SystemStatus, flags, raw);
     if (/^(?:system\s+metrics|metrics)$/i.test(input)) return cmd(Action.SystemMetrics, flags, raw);
     if (/^(?:tx\s+metrics|engine\s+status)$/i.test(input)) return cmd(Action.TxMetrics, flags, raw);

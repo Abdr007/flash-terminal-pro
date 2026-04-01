@@ -109,6 +109,7 @@ export enum Action {
   SystemAudit = 'system_audit',
   Doctor = 'doctor',
   Monitor = 'monitor',
+  Update = 'update',
 
   // Wallet
   WalletCreate = 'wallet_create',
