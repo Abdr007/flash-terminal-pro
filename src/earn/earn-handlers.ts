@@ -282,7 +282,7 @@ export async function handleEarnDashboard(api: FlashApiClient): Promise<TxResult
 
   const lines: string[] = [header('FLASH EARN DASHBOARD')];
 
-  lines.push(kvBold('Total Protocol TVL', usd(totalTvl)));
+  lines.push(kvBold('Total TVL', usd(totalTvl)));
   lines.push(kv('Active Pools', String(metrics.size)));
   lines.push(kv('Best APY', ranked.length > 0 ? apyColor(ranked[0].metrics.apy7d) + dim(' (' + ranked[0].pool.aliases[0] + ')') : '—'));
 

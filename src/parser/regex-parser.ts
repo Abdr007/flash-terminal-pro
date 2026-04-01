@@ -582,7 +582,7 @@ const walletPatterns: PatternMatcher[] = [
 
 const systemPatterns: PatternMatcher[] = [
   (input, raw, flags) => {
-    if (/^(?:health|status)$/i.test(input)) return cmd(Action.Health, flags, raw);
+    if (/^(?:health|status|protocol\s+health)$/i.test(input)) return cmd(Action.Health, flags, raw);
     if (/^(?:help|\?)$/i.test(input)) return cmd(Action.Help, flags, raw);
     const cfgMatch = input.match(/^config\s+(?:set\s+)?(\w+)\s+(.+)/i);
     if (cfgMatch) return cmd(Action.Config, { ...flags, key: cfgMatch[1], value: cfgMatch[2].trim() }, raw);
