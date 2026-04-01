@@ -30,7 +30,8 @@ import {
   ComputeBudgetProgram,
   type AddressLookupTableAccount,
 } from '@solana/web3.js';
-import { AnchorProvider, Wallet, BN } from '@coral-xyz/anchor';
+import { AnchorProvider, Wallet } from '@coral-xyz/anchor';
+import BN from 'bn.js';
 import { getLogger } from '../utils/logger.js';
 import type { FlashXConfig } from '../types/index.js';
 
